@@ -42,6 +42,7 @@ Until you settle on one app, change your data in only one of them; the two copie
 ### Limitations
 
 - Running on a device needs signing and a provisioning profile.
+- No app group, so a free personal team can sign it; the home-screen widget therefore shows nothing. With a paid team, add `group.$(APP_BUNDLE)` back to both entitlements files.
 - Pointer arguments accept only `null`; blocks support only the signatures in `main.m`.
 - One window scene (iOS 27 ends apps without one): windows must be made with `initWithWindowScene:`; one made with `initWithFrame:` never shows.
 
