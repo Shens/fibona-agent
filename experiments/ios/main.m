@@ -369,10 +369,10 @@ static NSDictionary *keychainItem(NSString *account) {
 // iOS 27 ends apps that do not adopt the scene lifecycle. There is one scene (Info.plist's
 // UIApplicationSceneManifest), and every window the app makes joins it.
 
-@interface FBScene : UIResponder <UIWindowSceneDelegate>
+@interface FibonaScene : UIResponder <UIWindowSceneDelegate>
 @end
 
-@implementation FBScene
+@implementation FibonaScene
 
 // Windows of a scene the system disconnected, as it may in the background, to move to the one that replaces it.
 static NSArray<UIWindow *> *orphans;

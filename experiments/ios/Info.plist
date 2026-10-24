@@ -38,7 +38,7 @@
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
-	<!-- iOS 27 ends apps without a scene: one window scene, delegated to FBScene in main.m. -->
+	<!-- iOS 27 ends apps without a scene: one window scene, delegated to FibonaScene in main.m. -->
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -51,7 +51,7 @@
 					<key>UISceneConfigurationName</key>
 					<string>Default</string>
 					<key>UISceneDelegateClassName</key>
-					<string>FBScene</string>
+					<string>FibonaScene</string>
 				</dict>
 			</array>
 		</dict>
