@@ -1,13 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- The capabilities a free personal team can sign, except keychain sharing. Fixed at build time. -->
+<!-- The capabilities a free personal team can sign, except keychain sharing and app groups. Fixed at build time. -->
 <plist version="1.0">
 <dict>
-	<!-- Shared with the widget, which reads what FBWidget.show() leaves there. -->
-	<key>com.apple.security.application-groups</key>
-	<array>
-		<string>group.$(APP_BUNDLE)</string>
-	</array>
+	<!-- No app group: a personal team's profiles reject it. With a paid team, add
+	     com.apple.security.application-groups = [group.$(APP_BUNDLE)] here and in widget/Widget.entitlements
+	     so the widget can show what the app draws. -->
 	<key>com.apple.developer.healthkit</key>
 	<true/>
 	<key>com.apple.developer.healthkit.access</key>

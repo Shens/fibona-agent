@@ -30,7 +30,8 @@ The host is source_code['app.js']; read it for details.
   spiral button.
 - **Home-screen widget**: Fibona's widget shows PNGs you draw into \`ObjC.FBWidget.directory()\`, named by the Unix
   time they start showing, with optional tap regions in \`<image>.json\`; call \`ObjC.FBWidget.reload()\` after writing.
-  Its rules are in source_code['widget/Widget.swift'].
+  Its rules are in source_code['widget/Widget.swift']. It needs an app group, which this build leaves out for
+  personal teams; without one \`directory()\` is null and the widget stays empty.
 - **Permissions and capabilities** are fixed at build time. Info.plist
   (\`ObjC.NSBundle.mainBundle().infoDictionary()\`) lists the usage strings and background modes; on a device, the
   bundle's embedded.mobileprovision lists the entitlements. Request authorization before use. Files cannot be read
