@@ -43,7 +43,7 @@ Until you settle on one app, change your data in only one of them; the two copie
 
 - Running on a device needs signing and a provisioning profile.
 - Pointer arguments accept only `null`; blocks support only the signatures in `main.m`.
-- Uses the app-delegate lifecycle, which iOS 26 deprecates in favor of scenes.
+- One window scene (iOS 27 ends apps without one): windows must be made with `initWithWindowScene:`; one made with `initWithFrame:` never shows.
 
 ## Development
 
