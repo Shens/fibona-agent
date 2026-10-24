@@ -347,7 +347,7 @@ static NSDictionary *keychainItem(NSString *account) {
   return YES;
 }
 
-// A URL that opens the app, such as a widget region's (fibona://widget/<name>), goes to JavaScript's openURL.
+// A URL that opens the app, such as a widget region's (fibona-dev://widget/<name>), goes to JavaScript's openURL.
 - (BOOL)application:(UIApplication *)app openURL:(NSURL *)url options:(NSDictionary *)options {
   [self.context[@"openURL"] callWithArguments:@[ url.absoluteString ]];
   return YES;

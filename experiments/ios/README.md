@@ -26,6 +26,19 @@ Edit `Fibona.xcodeproj` in Xcode to change the project.
 
 In the app, the console is always one tap away on the floating spiral button. Drag it to move it; hold it to reset Fibona to its first launch, deleting everything it built and the model settings. `boot.js` in the app's Documents directory runs at every launch. If `boot.js` fails to start 3 launches in a row, it is moved to `boot.failed.js` and the app starts with only the console. Every cell is appended to `history.jsonl` there, across launches; at launch the console only says how many it holds.
 
+### Alongside the official Fibona app
+
+This build installs next to the official app and never replaces it or reads its data: on a device its bundle identifier is `ai.fibona.ios.<TEAM>` (`ai.fibona.ios.dev.<TF_TEAM>` for TestFlight), and each app has its own Documents, keychain and app group. It shows as **Fibona Dev** and opens `fibona-dev://` links, so neither name nor links collide with the official app.
+
+Documents is visible in the Files app (On My iPhone › Fibona Dev). To move an app built in the official Fibona, such as IdeaBoard:
+
+1. In the official app, export its zip and save it to Files. This only reads its data.
+2. Install this build with `make device TEAM=<your-development-team>` and enter the model settings at first launch.
+3. In Files, unzip the export and copy `boot.js` and its data files (for IdeaBoard: `ideas.json`, `chat.json`, and `stable/` and `backups/` if present) into Fibona Dev.
+4. Swipe Fibona Dev away in the app switcher and open it again, so `boot.js` runs.
+
+Until you settle on one app, change your data in only one of them; the two copies do not sync.
+
 ### Limitations
 
 - Running on a device needs signing and a provisioning profile.

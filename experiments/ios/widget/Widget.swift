@@ -102,7 +102,7 @@ struct FibonaView: View {
               Button(intent: Tap(region: region.name, image: image)) { target }.buttonStyle(.plain)
             } else {
               // ponytail: small widgets ignore Link, so there any tap opens the app without a region.
-              Link(destination: URL(string: "fibona://widget/" + (region.name.addingPercentEncoding(
+              Link(destination: URL(string: "fibona-dev://widget/" + (region.name.addingPercentEncoding(
                 withAllowedCharacters: .urlPathAllowed) ?? ""))!) { target }
             }
           }

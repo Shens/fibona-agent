@@ -7,8 +7,9 @@ SIM ?= Fibona
 # Signing teams have no default: pass TEAM=<your development team> (and TF_TEAM= for TestFlight).
 TEAM ?=
 # TestFlight: a paid team, and the App Store Connect app's bundle identifier.
+# Suffixed with the team, like DEVICE_BUNDLE, so it never matches the official Fibona app's.
 TF_TEAM ?=
-TF_BUNDLE ?= ai.fibona.ios.test
+TF_BUNDLE ?= ai.fibona.ios.dev.$(TF_TEAM)
 DEVICE_BUNDLE ?= ai.fibona.ios.$(TEAM)
 # The first paired iPhone connected by cable; pass DEVICE=<identifier from `xcrun devicectl list devices`> to choose.
 DEVICE ?= $(shell xcrun devicectl list devices --hide-headers --hide-default-columns --columns identifier \
