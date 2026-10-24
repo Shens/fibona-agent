@@ -52,7 +52,7 @@ build: $(ICON) $(HANDLE)  # The app for the simulator. The model settings are as
 run: build  # Type the task in the app. Output appears here too.
 	xcrun simctl list devices available | grep -q " $(SIM) (" || xcrun simctl create $(SIM) "iPhone 16 Pro"
 	xcrun simctl boot $(SIM) 2>/dev/null || true
-	open -a Simulator
+	open -a Simulator 2>/dev/null || echo "No Simulator app found; the app still runs. See it with: xcrun simctl io $(SIM) screenshot screen.png"
 	xcrun simctl install $(SIM) $(APP)
 	xcrun simctl launch --console-pty --terminate-running-process $(SIM) ai.fibona.ios
 

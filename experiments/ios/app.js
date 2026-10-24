@@ -24,8 +24,10 @@ The host is source_code['app.js']; read it for details.
   (\`tableView_numberOfRowsInSection_\`); name its protocols so argument and return types are known.
 - UIKit holds delegates and targets weakly: keep them in globals. An invalid call throws; a wrong pointer or a
   freed object crashes the app, and this session with it.
-- Build interfaces with UIKit (SwiftUI is not reachable) in your own UIWindow, then hide the console with
-  \`consoleWindow.setHidden_(true)\`. The user can reopen it with the floating spiral button.
+- Build interfaces with UIKit (SwiftUI is not reachable) in your own UIWindow, made with
+  \`ObjC.UIWindow.alloc().initWithWindowScene_(windowScene)\` (one made with initWithFrame_ joins no scene and never
+  shows), then hide the console with \`consoleWindow.setHidden_(true)\`. The user can reopen it with the floating
+  spiral button.
 - **Home-screen widget**: Fibona's widget shows PNGs you draw into \`ObjC.FBWidget.directory()\`, named by the Unix
   time they start showing, with optional tap regions in \`<image>.json\`; call \`ObjC.FBWidget.reload()\` after writing.
   Its rules are in source_code['widget/Widget.swift'].
@@ -101,6 +103,9 @@ globalThis.ObjC = new Proxy({
   get: (helpers, name) => (typeof name === "symbol" || name === "then" ? undefined : helpers[name] ?? wrap(native.cls(name))),
 });
 
+// The app's one window scene, current even after the system replaces it. Every window must join it to show.
+Object.defineProperty(globalThis, "windowScene", { get: () => wrap(native.scene()) });
+
 // --- CONSOLE -------------------------------------------------------------------------------------------
 // Laid out and colored like bootstraps/terminal: the conversation, the composer, then a status line that keeps
 // moving while the agent works (state, elapsed time, and tokens per second while the model streams).
@@ -134,7 +139,7 @@ class Console {
 
   constructor() {
     const screen = ObjC.UIScreen.mainScreen().bounds();
-    this.window = ObjC.UIWindow.alloc().initWithFrame_(screen);
+    this.window = ObjC.UIWindow.alloc().initWithWindowScene_(windowScene);
     this.window.setWindowLevel_(2001);  // Above alerts (2000).
     this.window.setOverrideUserInterfaceStyle_(2);  // Dark.
     this.window.setRootViewController_(ObjC.UIViewController.new());
@@ -213,7 +218,8 @@ class Console {
 
     // A 48-point button in a 64-point window, so its shadow has room to show.
     // Starts above the tallest composer, so it never covers what the user types.
-    this.handleWindow = ObjC.UIWindow.alloc().initWithFrame_([screen[2] - 72, screen[3] - 300, 64, 64]);
+    this.handleWindow = ObjC.UIWindow.alloc().initWithWindowScene_(windowScene);
+    this.handleWindow.setFrame_([screen[2] - 72, screen[3] - 300, 64, 64]);
     this.handleWindow.setWindowLevel_(2002);
     this.handleWindow.setRootViewController_(ObjC.UIViewController.new());
     const handle = ObjC.UIButton.buttonWithType_(0);  // Custom: the image keeps its own colors.

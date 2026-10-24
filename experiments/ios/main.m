@@ -202,6 +202,7 @@ static NSString *jsName(SEL s) {
 
 @protocol FBNativeExports <JSExport>
 - (id)cls:(NSString *)name;
+- (id)scene;
 JSExportAs(send, -(id)send:(id)target selector:(NSString *)name args:(NSArray *)args);
 JSExportAs(block, -(id)block:(NSString *)types fn:(JSValue *)fn);
 JSExportAs(delegate, -(id)delegate:(JSValue *)handlers protocols:(NSArray *)protocols);
@@ -217,6 +218,12 @@ JSExportAs(keychainSet, -(int)keychainSet:(NSString *)account value:(NSString *)
 
 - (id)cls:(NSString *)name {
   return NSClassFromString(name);
+}
+
+// The app's window scene. A window shows only once it joins a scene: initWithWindowScene:, not initWithFrame:.
+static UIWindowScene *windowScene;
+- (id)scene {
+  return windowScene;
 }
 
 // Sends a message with arguments converted by the method's type encoding, e.g. send(label, "setText:", ["hi"]).
@@ -334,6 +341,11 @@ static NSDictionary *keychainItem(NSString *account) {
 @implementation FBApp
 
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)options {
+  return YES;  // JavaScript starts with the scene, so its windows have one to join.
+}
+
+// Runs core.js and app.js once, when the first scene connects.
+- (void)start {
   self.context = [JSContext new];
   self.context.exceptionHandler = ^(JSContext *c, JSValue *e) {
     fprintf(stderr, "[fibona] uncaught: %s\n%s\n", e.toString.UTF8String, e[@"stack"].toString.UTF8String);
@@ -344,13 +356,42 @@ static NSDictionary *keychainItem(NSString *account) {
     NSString *source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (source) [self.context evaluateScript:source withSourceURL:[NSURL fileURLWithPath:path]];
   }
-  return YES;
 }
 
 // A URL that opens the app, such as a widget region's (fibona-dev://widget/<name>), goes to JavaScript's openURL.
-- (BOOL)application:(UIApplication *)app openURL:(NSURL *)url options:(NSDictionary *)options {
-  [self.context[@"openURL"] callWithArguments:@[ url.absoluteString ]];
-  return YES;
+- (void)open:(NSSet<UIOpenURLContext *> *)contexts {
+  for (UIOpenURLContext *c in contexts) [self.context[@"openURL"] callWithArguments:@[ c.URL.absoluteString ]];
+}
+
+@end
+
+// --- SCENE ---------------------------------------------------------------------------------------------
+// iOS 27 ends apps that do not adopt the scene lifecycle. There is one scene (Info.plist's
+// UIApplicationSceneManifest), and every window the app makes joins it.
+
+@interface FibonaScene : UIResponder <UIWindowSceneDelegate>
+@end
+
+@implementation FibonaScene
+
+// Windows of a scene the system disconnected, as it may in the background, to move to the one that replaces it.
+static NSArray<UIWindow *> *orphans;
+
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
+  FBApp *app = (FBApp *)UIApplication.sharedApplication.delegate;
+  windowScene = (UIWindowScene *)scene;
+  if (!app.context) [app start];
+  for (UIWindow *w in orphans) w.windowScene = windowScene;
+  orphans = nil;
+  [app open:options.URLContexts];
+}
+
+- (void)sceneDidDisconnect:(UIScene *)scene {
+  orphans = ((UIWindowScene *)scene).windows;
+}
+
+- (void)scene:(UIScene *)scene openURLContexts:(NSSet<UIOpenURLContext *> *)contexts {
+  [(FBApp *)UIApplication.sharedApplication.delegate open:contexts];
 }
 
 @end
