@@ -12,8 +12,9 @@ TF_TEAM ?=
 TF_BUNDLE ?= ai.fibona.ios.dev.$(TF_TEAM)
 DEVICE_BUNDLE ?= ai.fibona.ios.$(TEAM)
 # The first paired iPhone connected by cable; pass DEVICE=<identifier from `xcrun devicectl list devices`> to choose.
+# Its first word only: newer Xcode prints the identifier as "<udid> (UDID)".
 DEVICE ?= $(shell xcrun devicectl list devices --hide-headers --hide-default-columns --columns identifier \
-  --filter "connectionProperties.transportType == 'wired'" 2>/dev/null | grep -v "No devices" | head -1)
+  --filter "connectionProperties.transportType == 'wired'" 2>/dev/null | grep -v "No devices" | head -1 | awk '{print $$1}')
 
 .DEFAULT_GOAL := build
 .PHONY: build run device testflight
@@ -62,7 +63,7 @@ device: Fibona.xcodeproj/project.pbxproj $(ICON) $(HANDLE)
 	test -n "$(TEAM)" || { echo "Pass TEAM=<your development team>"; exit 1; }
 	test -n "$(DEVICE)" || { echo "No iPhone connected by cable: unlock it, trust this Mac, or pass DEVICE=..."; exit 1; }
 	xcodebuild -project Fibona.xcodeproj -scheme Fibona -configuration Debug -quiet \
-	  -destination id=$$(xcrun devicectl device info details --device $(DEVICE) | awk '/ udid:/ {print $$NF}') \
+	  -destination id=$$(xcrun devicectl device info details --device $(DEVICE) 2>/dev/null | awk '/ udid:/ {print $$NF}' | grep . || echo $(DEVICE)) \
 	  -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
 	  DEVELOPMENT_TEAM=$(TEAM) APP_BUNDLE=$(DEVICE_BUNDLE) SYMROOT=$(CURDIR)/build/device
 	xcrun devicectl device install app --device $(DEVICE) build/device/Debug-iphoneos/Fibona.app
