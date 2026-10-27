@@ -145,6 +145,7 @@ class Console {
   state = "Ready";
   started = Date.now();
   modelRequests = 0;
+  retryAt = 0;  // When a rate-limited model request is sent again; 0 when none waits. See request.
   tokenSamples = [];  // [time, total tokens]
 
   constructor() {
@@ -430,6 +431,8 @@ class Console {
     const running = this.state.startsWith("Running");
     if (running && stop.requested) {
       state = "Stopping · when the cell next waits on the network";
+    } else if (this.retryAt > now) {  // See request.
+      state = `Rate limited · retrying in ${Math.ceil((this.retryAt - now) / 1000)}s`;
     } else if (this.modelRequests) {
       const streaming = this.tokenSamples.length && this.tokenSamples.at(-1)[0] > this.started;
       state = `${streaming ? "Generating" : "Thinking"} · ${seconds}s`;
@@ -696,16 +699,58 @@ let CONFIG = JSON.parse(native.keychainGet(SETTINGS) ?? "null");  // {baseURL, a
 // One Responses API request to CONFIG; the model is CONFIG's unless the body names
 // one. It streams, like bootstraps/terminal, so the console can show progress, and resolves to the complete response.
 // One the network drops, as when the phone locks and the app is suspended mid-stream, is sent again, up to 3 times.
+// One the provider refuses for its rate limit (HTTP 429, but not a used-up balance) is sent again after the wait it
+// asks for, growing each time, up to 4 times: a low tier allows only a few requests a minute.
 async function request(body) {
   for (let attempt = 1; ; attempt++) {
     try {
       return await streamResponse(body);
     } catch (e) {
-      if (!e.networkLost || attempt > 3) throw e;
-      logApp(`Model request lost (${e.message}); sending it again, attempt ${attempt + 1}.`);
-      await new Promise((done) => setTimeout(done, 2000 * attempt));
+      if (e.networkLost && attempt <= 3) {
+        logApp(`Model request lost (${e.message}); sending it again, attempt ${attempt + 1}.`);
+        await pause(2000 * attempt);
+      } else if (e.rateLimited && attempt <= 4) {
+        const ms = Math.min(60000, Math.max(e.retryAfter ?? 1, 1) * 1000 * 2 ** (attempt - 1));
+        logApp(`Model request rate limited; sending it again in ${Math.round(ms / 1000)}s, attempt ${attempt + 1}.`);
+        appConsole.retryAt = Date.now() + ms;
+        try {
+          await pause(ms);
+        } finally {
+          appConsole.retryAt = 0;
+        }
+      } else {
+        throw e;
+      }
     }
   }
+}
+
+// Waits ms, unless a stop comes first; see stopCell.
+async function pause(ms) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (stop.requested) throw new Error(STOPPED);
+    await new Promise((done) => setTimeout(done, Math.min(250, until - Date.now())));
+  }
+  if (stop.requested) throw new Error(STOPPED);
+}
+
+// For an HTTP 429: whether waiting can help (not when the balance or budget is used up), and how long the provider
+// asks to wait, in seconds, from Retry-After, X-RateLimit-Reset (seconds, or a Unix time) or the message.
+function rateLimit(task, raw) {
+  if (/insufficient_quota|budget|balance|billing|credit/i.test(raw) && !/rate.?limit|RPM|TPM/i.test(raw)) return null;
+  const header = (name) => {
+    try {
+      return Number(task.response().valueForHTTPHeaderField_(name)) || null;
+    } catch {
+      return null;
+    }
+  };
+  let wait = header("Retry-After");
+  const reset = header("X-RateLimit-Reset");
+  if (wait == null && reset != null) wait = reset > 1e9 ? reset - Date.now() / 1000 : reset;
+  if (wait == null) wait = Number(raw.match(/after (\d+(?:\.\d+)?) ?s/i)?.[1]) || null;
+  return { retryAfter: wait == null ? null : Math.max(0, wait) };
 }
 
 // NSURLErrorDomain codes for a connection that failed or dropped: timed out, cannot connect, connection lost, offline.
@@ -768,7 +813,11 @@ function streamResponse(body) {
           });
           settle(reject, lost);
         }
-        else if (status !== 200) settle(reject, new Error(`Model request failed: HTTP ${status}: ${raw}`));
+        else if (status !== 200) {
+          const limited = status === 429 ? rateLimit(task, raw) : null;
+          settle(reject, Object.assign(new Error(`Model request failed: HTTP ${status}: ${raw}`),
+            limited ? { rateLimited: true, retryAfter: limited.retryAfter } : {}));
+        }
         else settle(reject, new Error("Model stream ended without a final response."));
       },
     }, ["NSURLSessionDataDelegate"]);
