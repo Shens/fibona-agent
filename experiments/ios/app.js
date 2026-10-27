@@ -184,7 +184,17 @@ class Console {
     this.statusLabel.setContentHuggingPriority_forAxis_(1, 0);
     this.speedLabel = ObjC.UILabel.new();
     this.speedLabel.setContentCompressionResistancePriority_forAxis_(1000, 0);
-    const status = ObjC.UIStackView.alloc().initWithArrangedSubviews_([this.spinner, this.statusLabel, this.speedLabel]);
+    // Shown while a cell runs; see stopCell.
+    this.stopButton = ObjC.UIButton.buttonWithType_(1);
+    this.stopButton.setImage_forState_(ObjC.UIImage.systemImageNamed_("stop.circle.fill"), 0);
+    this.stopButton.setTintColor_(COLORS.error);
+    this.stopButton.setAccessibilityLabel_("Stop the running cell");
+    this.stopButton.setContentCompressionResistancePriority_forAxis_(1000, 0);
+    this.stopButton.setHidden_(true);
+    this.stopTarget = ObjC.delegate({ stop: () => stopCell() });
+    this.stopButton.addTarget_action_forControlEvents_(this.stopTarget, "stop", 64);  // Touch up inside.
+    const status = ObjC.UIStackView.alloc().initWithArrangedSubviews_(
+      [this.spinner, this.statusLabel, this.speedLabel, this.stopButton]);
     status.setSpacing_(6);
 
     for (const v of [this.log, this.field, status]) {
@@ -356,15 +366,17 @@ class Console {
   finishCell(result) {
     const { at, length, segment } = this.currentCell;
     const storage = this.log.textStorage();
-    if (result.error) storage.addAttribute_value_range_("NSColor", COLORS.error, [at, length]);
-    storage.replaceCharactersInRange_withAttributedString_([at, 1],
-      this.styled(result.error ? "✗" : "✓", result.error ? "error" : "cell"));
+    const stopped = result.error === STOPPED;  // A stopped cell, marked ■ as in the terminal.
+    const [mark, color] = stopped ? ["■", "notice"] : result.error ? ["✗", "error"] : ["✓", "cell"];
+    if (result.error) storage.addAttribute_value_range_("NSColor", COLORS[color], [at, length]);
+    storage.replaceCharactersInRange_withAttributedString_([at, 1], this.styled(mark, color));
     if (segment) {  // Missing if a cell replaced currentCell.
-      segment[0] = (result.error ? "✗" : "✓") + segment[0].slice(1);
-      if (result.error) segment[1] = "error";
+      segment[0] = mark + segment[0].slice(1);
+      if (result.error) segment[1] = color;
       this.unsaved = true;
     }
-    if (result.error) this.append(result.error + "\n", "error");
+    if (stopped) this.append("Stopped. Send a message to go on.\n", "notice");
+    else if (result.error) this.append(result.error + "\n", "error");
     this.setState(result.quit ? "Ended" : "Ready");
   }
 
@@ -412,7 +424,10 @@ class Console {
     }
     const seconds = ((now - this.started) / 1000).toFixed(1);
     let state = this.state;
-    if (this.modelRequests) {
+    const running = this.state.startsWith("Running");
+    if (running && stop.requested) {
+      state = "Stopping · when the cell next waits on the network";
+    } else if (this.modelRequests) {
       const streaming = this.tokenSamples.length && this.tokenSamples.at(-1)[0] > this.started;
       state = `${streaming ? "Generating" : "Thinking"} · ${seconds}s`;
     } else if (state.startsWith("Running")) {
@@ -422,6 +437,8 @@ class Console {
     this.speedLabel.setAttributedText_(this.styled(`↓ ${speed.toFixed(0)} tok/s`, "speed", 12));
     const busy = this.modelRequests > 0 || this.state.startsWith("Running");
     if (busy !== this.spinner.isAnimating()) busy ? this.spinner.startAnimating() : this.spinner.stopAnimating();
+    const canStop = running && !stop.requested;
+    if (canStop === this.stopButton.isHidden()) this.stopButton.setHidden_(!canStop);
     if (this.unsaved && now - this.savedAt >= 2000) this.save();
   }
 
@@ -495,6 +512,31 @@ const session = ObjC.NSURLSession.sessionWithConfiguration_delegate_delegateQueu
   ObjC.NSURLSessionConfiguration.ephemeralSessionConfiguration(), null, ObjC.NSOperationQueue.mainQueue(),
 );
 
+// Stop, as the terminal's Ctrl+C upstream: the console's stop button ends the running cell. JavaScript cannot be
+// interrupted, so the stop lands where the cell waits on the network: requests in flight fail with STOPPED, and so
+// does every new one until the cell ends, which then counts as stopped. The run waits for the user's next message
+// instead of repairing. ponytail: requests boot.js makes meanwhile, outside the cell, fail as well.
+const STOPPED = "Stopped by the user.";
+const stop = { requested: false, inflight: new Set() };  // inflight: {task, reject} of each request a stop ends
+function stopCell() {
+  stop.requested = true;
+  for (const r of stop.inflight) {
+    r.reject(new Error(STOPPED));
+    r.task.cancel();
+  }
+  stop.inflight.clear();
+}
+// Registers a request's task for a stop to cancel; returns false, having rejected, when a stop is pending.
+function trackRequest(task, reject) {
+  if (stop.requested) {
+    reject(new Error(STOPPED));
+    return null;
+  }
+  const entry = { task, reject };
+  stop.inflight.add(entry);
+  return entry;
+}
+
 globalThis.http = (url, { method = "GET", headers = {}, body = null } = {}) =>
   new Promise((resolve, reject) => {
     const request = ObjC.NSMutableURLRequest.requestWithURL_(ObjC.NSURL.URLWithString_(url));
@@ -502,11 +544,15 @@ globalThis.http = (url, { method = "GET", headers = {}, body = null } = {}) =>
     request.setTimeoutInterval_(600);
     for (const [k, v] of Object.entries(headers)) request.setValue_forHTTPHeaderField_(v, k);
     if (body !== null) request.setHTTPBody_(ObjC.send(body, "dataUsingEncoding:", 4));  // UTF-8
+    let entry = null;
     const done = ObjC.block("v@@@", (data, response, error) => {
+      stop.inflight.delete(entry);
       if (error) reject(new Error(error.localizedDescription()));
       else resolve({ status: response.statusCode(), text: ObjC.NSString.alloc().initWithData_encoding_(data, 4) });
     });
-    session.dataTaskWithRequest_completionHandler_(request, done).resume();
+    const task = session.dataTaskWithRequest_completionHandler_(request, done);
+    entry = trackRequest(task, reject);
+    if (entry) task.resume();
   });
 
 const files = ObjC.NSFileManager.defaultManager();
@@ -675,9 +721,11 @@ function streamResponse(body) {
     let buffer = "";  // Text not yet split into server-sent events.
     let raw = "";  // Everything received, for errors that are not events.
     let settled = false;
+    let entry = null;  // For a stop to end this request; see stopCell.
     const settle = (fn, value) => {
       if (settled) return;
       settled = true;
+      stop.inflight.delete(entry);
       appConsole.modelEnded();
       fn(value);
     };
@@ -727,7 +775,9 @@ function streamResponse(body) {
     const session = ObjC.NSURLSession.sessionWithConfiguration_delegate_delegateQueue_(
       config, delegate, ObjC.NSOperationQueue.mainQueue());
     appConsole.modelStarted();
-    session.dataTaskWithRequest_(req).resume();
+    const task = session.dataTaskWithRequest_(req);
+    entry = trackRequest(task, (e) => settle(reject, e));
+    if (entry) task.resume();
     session.finishTasksAndInvalidate();
   });
 }
@@ -909,6 +959,19 @@ async function setup() {
   }
 }
 
+// Makes core's repair cell after a stopped cell wait for the user, then wake the mind with the usual context and
+// their message, as the terminal bootstrap does upstream. Core binds call_me just before onCell, so it is replaced here.
+function waitAfterStop(number) {
+  const wake = globalThis.call_me;
+  globalThis.call_me = async (input, body) => {
+    const message = await appConsole.input();
+    const note = `The user stopped cell ${number} partway; its side effects are not rolled back (record in history, `
+      + `state in globals()). Their message:\n\n${message}`;
+    const context = typeof globalThis.build_context === "function" ? globalThis.build_context() : [];
+    return wake([...context, { role: "user", content: note }], body);
+  };
+}
+
 // The agent reads each task with input(); when a run ends, a new one waits for the next message.
 let runningCell = null;  // The running cell's code and summary, for its line in HISTORY.
 // A relaunch shows the conversation as it was and continues the run it ended: the run's cells since its bootstrap
@@ -929,15 +992,26 @@ async function main() {
   await boot();
   while (true) {
     let hidden = resumed.length > 0;  // The resumed run's bootstrap cell, shown only if it fails.
+    let stopped = false;  // Whether the last cell was stopped, so core's repair cell waits for the user instead.
     appConsole.setEnded(false);
     await agent.run(BOOTSTRAP, {
       env,
       history: resumed,
       onCell: (number, summary, code) => {
+        if (stopped && summary === Agent.REPAIR_SUMMARY) {
+          waitAfterStop(number - 1);
+          summary = "Wait for the user's message after the stop.";
+        }
+        stopped = false;
         runningCell = { code, summary };
         if (!hidden) appConsole.addCell(number, summary);
       },
       onResult: (number, result) => {
+        // A cell that ends while a stop is pending was stopped, even if it caught the error and went on.
+        if (stop.requested) {
+          stop.requested = false;
+          if (!result.quit) [result.error, stopped] = [STOPPED, true];
+        }
         if (hidden) {
           hidden = false;
           if (!result.error) return;  // Not one of the run's cells, so not in HISTORY either.
