@@ -113,6 +113,9 @@ Object.defineProperty(globalThis, "windowScene", { get: () => wrap(native.scene(
 // Laid out and colored like bootstraps/terminal: the conversation, the composer, then a status line that keeps
 // moving while the agent works (state, elapsed time, and tokens per second while the model streams).
 
+// The name on the home screen (Info.plist), so messages and notifications tell this build apart from the official app.
+const APP_NAME = String(ObjC.NSBundle.mainBundle().objectForInfoDictionaryKey_("CFBundleDisplayName") ?? "Fibona");
+
 const rgb = (hex) => ObjC.UIColor.colorWithRed_green_blue_alpha_(
   ...[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255), 1);
 const COLORS = mapValues({ background: "#20202e", text: "#d6d6dd", composer: "#41414e", status: "#a4cea2",
@@ -242,7 +245,7 @@ class Console {
     const handle = ObjC.UIButton.buttonWithType_(0);  // Custom: the image keeps its own colors.
     handle.setFrame_([8, 8, 48, 48]);
     handle.setImage_forState_(ObjC.UIImage.imageNamed_("Handle"), 0);  // The app icon's spiral, from Assets.xcassets.
-    handle.setAccessibilityLabel_("Fibona console");
+    handle.setAccessibilityLabel_(`${APP_NAME} console`);
     handle.imageView().layer().setCornerRadius_(24);  // Round the image, not the button, so the shadow is not clipped.
     handle.imageView().setClipsToBounds_(true);
     handle.layer().setShadowOpacity_(0.35);  // The default shadow color is black.
@@ -386,7 +389,7 @@ class Console {
     this.started = Date.now();
     const waiting = state === "Waiting for input";
     this.field.setEditable_(waiting);  // While the agent works, nothing can be typed, not only sent.
-    const placeholder = waiting ? "Message Fibona…" : "Fibona is working…";
+    const placeholder = waiting ? `Message ${APP_NAME}…` : `${APP_NAME} is working…`;
     this.placeholder.setAttributedText_(this.styled(placeholder, "notice", 15));
   }
 
@@ -481,8 +484,8 @@ class Console {
 
   confirmReset() {
     this.show();
-    const alert = ObjC.UIAlertController.alertControllerWithTitle_message_preferredStyle_("Reset Fibona?",
-      "This deletes everything Fibona built and saved, then closes the app. Open it again to start fresh.", 1);
+    const alert = ObjC.UIAlertController.alertControllerWithTitle_message_preferredStyle_(`Reset ${APP_NAME}?`,
+      `This deletes everything ${APP_NAME} built and saved, then closes the app. Open it again to start fresh.`, 1);
     alert.addAction_(ObjC.UIAlertAction.actionWithTitle_style_handler_("Cancel", 1, null));
     alert.addAction_(ObjC.UIAlertAction.actionWithTitle_style_handler_("Reset", 2, ObjC.block("v@", () => resetApp())));
     this.window.rootViewController().presentViewController_animated_completion_(alert, true, null);
@@ -591,7 +594,7 @@ function keepWorking(state, detail = "") {
       }));
     }));
     if (!scheduler.submitTaskRequest_error_(ObjC.BGContinuedProcessingTaskRequest.alloc()
-      .initWithIdentifier_title_subtitle_(id, "Fibona is working", state), null)) backgroundTask = null;
+      .initWithIdentifier_title_subtitle_(id, `${APP_NAME} is working`, state), null)) backgroundTask = null;
   }
   if (state.startsWith("Running · cell ")) {
     progress = { cell: Number(state.slice("Running · cell ".length)), chunks: 0 };
@@ -599,7 +602,7 @@ function keepWorking(state, detail = "") {
   }
   // The title says which cell, the subtitle what it does.
   if (detail && backgroundTask?.updateTitle_subtitle_) {
-    backgroundTask.updateTitle_subtitle_("Fibona · " + state.replace("Running · ", ""), detail);
+    backgroundTask.updateTitle_subtitle_(`${APP_NAME} · ` + state.replace("Running · ", ""), detail);
   }
 }
 // What the app does outside cells, so the agent can see how what it built behaves in the user's hands: prints from
@@ -909,7 +912,7 @@ function resetApp() {
   try {
     ObjC.UIApplication.sharedApplication().performSelector_("terminateWithSuccess");  // Private; there is no public way.
   } catch {
-    env.write("Reset done. Close Fibona and open it again.\n");
+    env.write(`Reset done. Close ${APP_NAME} and open it again.\n`);
   }
 }
 
@@ -940,7 +943,7 @@ async function boot() {
 // First launch: ask for the model settings in the console, check them with one small request, and keep them in the
 // keychain. Asks again until a request works. Reset deletes them.
 async function setup() {
-  env.write("Fibona needs a model API to think with. It asks once and keeps the answers in this phone's keychain.\n\n");
+  env.write(`${APP_NAME} needs a model API to think with. It asks once and keeps the answers in this phone's keychain.\n\n`);
   while (true) {
     const baseURL = (await appConsole.input("Model API base URL")).trim();
     const apiKey = (await appConsole.input("API key", { secret: true })).trim();
@@ -1028,4 +1031,4 @@ async function main() {
   }
 }
 
-main().catch((e) => env.write(`Fibona stopped: ${e}\n${e?.stack ?? ""}\n`));
+main().catch((e) => env.write(`${APP_NAME} stopped: ${e}\n${e?.stack ?? ""}\n`));
