@@ -19,9 +19,10 @@ DEVICE ?= $(shell xcrun devicectl list devices --hide-headers --hide-default-col
 .DEFAULT_GOAL := build
 .PHONY: build run device testflight
 
-# The app icon, from public/favicon.svg: full-bleed on its own background (iOS rounds the corners), without alpha.
+# The app icon, from public/beta-icon.svg: a β, so this build tells itself apart from the official app; full-bleed
+# on its own background (iOS rounds the corners), without alpha. Its serif β needs Georgia or another serif font.
 ICON = Assets.xcassets/AppIcon.appiconset/icon.png
-$(ICON): public/favicon.svg
+$(ICON): public/beta-icon.svg
 	mkdir -p build
 	rsvg-convert -w 1024 -h 1024 --background-color '#FAF8F4' $< -o build/icon.png
 	sips -s format jpeg build/icon.png --out build/icon.jpg >/dev/null && sips -s format png build/icon.jpg --out $@ >/dev/null
