@@ -13,7 +13,9 @@ The host is source_code['app.js']; read it for details.
 - **Files** persist in \`DOCS\` (Documents); variables do not outlive the app. \`DOCS + "/boot.js"\`, if present,
   runs as a cell at every launch, before you wake: write what you build there to become it. After 3 failed
   launches in a row it is moved to \`boot.failed.js\`. Every cell, across launches, is a line of
-  \`DOCS + "/history.jsonl"\`, shaped like \`history\`'s records.
+  \`DOCS + "/history.jsonl"\`, shaped like \`history\`'s records. When the app is ended and opened again, the
+  console shows its conversation as it was and the run goes on: \`history\` holds its cells again, numbered on,
+  and the next message the user sends continues it. Do not replay history into the console yourself.
 - **Objective-C**: \`ObjC.UILabel\` is a class; a method call sends its selector with \`_\` for each \`:\`, as in
   \`ObjC.UILabel.alloc().initWithFrame_([0, 0, 200, 40])\`. Strings, numbers, booleans, arrays and plain objects
   convert both ways and come back as plain JS values; call methods on them with
@@ -133,6 +135,10 @@ class Console {
   secret = false;  // The pending input is shown masked once sent.
   fallback = null;  // What an empty reply to the pending input means; null when a reply must not be empty.
   welcome = true;
+  segments = [];  // The conversation since the welcome text as [text, color, kind], kept in TRANSCRIPT.
+  ended = false;  // Whether the run ended, so the next launch starts a new one instead of continuing it.
+  unsaved = false;  // Whether TRANSCRIPT lacks some of the above.
+  savedAt = 0;  // When it was last written, or tried.
   state = "Ready";
   started = Date.now();
   modelRequests = 0;
@@ -245,6 +251,10 @@ class Console {
     this.handleWindow.setHidden_(false);
 
     this.timer = ObjC.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.1, true, ObjC.block("v@", () => this.refresh()));
+    // Leaving the app is the last sure chance to save: the system may end it in the background without a word.
+    this.leaving = ObjC.block("v@", () => this.save());
+    ObjC.NSNotificationCenter.defaultCenter().addObserverForName_object_queue_usingBlock_(
+      "UIApplicationDidEnterBackgroundNotification", null, null, this.leaving);
   }
 
   styled(text, color = "text", size = 13, extra = {}) {
@@ -252,8 +262,21 @@ class Console {
       { NSFont: mono(size), NSColor: COLORS[color], ...extra });
   }
 
+  // What each kind of text adds to its color: cell output indents under its cell, the user's lines stand out bold.
+  kindStyle(kind) {
+    if (kind === "output") {
+      const indent = ObjC.NSMutableParagraphStyle.new();
+      indent.setFirstLineHeadIndent_(18);
+      indent.setHeadIndent_(18);
+      return { NSParagraphStyle: indent };
+    }
+    if (kind === "user") return { NSBackgroundColor: COLORS.composer, NSFont: mono(13, 0.4) };  // Bold.
+    return {};
+  }
+
   // Append to the conversation, following the end unless the user has scrolled up to read.
-  append(text, color = "text", extra = {}) {
+  // `kind` may also be attributes of the caller's own, which a later launch shows as plain text.
+  append(text, color = "text", kind = "plain") {
     const storage = this.log.textStorage();
     if (this.welcome) {
       this.welcome = false;
@@ -261,9 +284,48 @@ class Console {
     }
     const [, y] = this.log.contentOffset();
     const following = y + this.log.bounds()[3] >= this.log.contentSize()[1] - 40;
+    const extra = typeof kind === "string" ? this.kindStyle(kind) : kind;
     storage.appendAttributedString_(this.styled(text, color, 13, extra));
+    this.segments.push([text, color, typeof kind === "string" ? kind : "plain"]);
+    this.unsaved = true;
     native.log(text);
     if (following) this.log.scrollRangeToVisible_([storage.length(), 0]);
+  }
+
+  // The conversation as the last launch left it, scrolled to its end. The window is laid out first, as it may be
+  // hidden, and again when it shows, since it may not have its final size yet.
+  restore(segments, ended) {
+    let length = 0;
+    const kept = segments.reverse().filter(([text]) => (length += text.length) <= TRANSCRIPT_LIMIT).reverse();
+    // A cell the app ended while it ran never finished; its header stays, without the color of one that runs.
+    for (const segment of kept) if (segment[1] === "cell" && segment[0].startsWith("● ")) segment[1] = "notice";
+    const text = ObjC.NSMutableAttributedString.new();
+    const styles = { plain: {}, output: this.kindStyle("output"), user: this.kindStyle("user") };
+    for (const [part, color, kind] of kept) text.appendAttributedString_(this.styled(part, color, 13, styles[kind] ?? {}));
+    this.log.setAttributedText_(text);
+    Object.assign(this, { welcome: false, segments: kept, ended, unsaved: true, scrollPending: true });
+    this.scrollToEnd();
+  }
+
+  scrollToEnd() {
+    this.window.rootViewController().view().layoutIfNeeded();
+    this.log.scrollRangeToVisible_([this.log.textStorage().length(), 0]);
+  }
+
+  // Keep the conversation for the next launch. Fails while the phone is locked, and is tried again.
+  // ponytail: rewritten whole each time, at most every 2 seconds while it changes.
+  save() {
+    if (!this.unsaved) return;
+    this.savedAt = Date.now();
+    files.createDirectoryAtPath_withIntermediateDirectories_attributes_error_(SUPPORT, true, null, null);
+    const json = JSON.stringify({ segments: this.segments, ended: this.ended });
+    if (ObjC.send(json, "writeToFile:atomically:encoding:error:", TRANSCRIPT, true, 4, null)) this.unsaved = false;
+  }
+
+  // Whether the run ended or goes on, for the next launch.
+  setEnded(ended) {
+    this.ended = ended;
+    this.unsaved = true;
   }
 
   showWelcome() {
@@ -277,27 +339,31 @@ class Console {
 
   // Cell output, indented under its cell; `print` in cells.
   write(text) {
-    const indent = ObjC.NSMutableParagraphStyle.new();
-    indent.setFirstLineHeadIndent_(18);
-    indent.setHeadIndent_(18);
-    this.append(text, "text", { NSParagraphStyle: indent });
+    this.append(text, "text", "output");
   }
 
   addCell(number, summary) {
-    if (!this.welcome && !this.log.textStorage().string().endsWith("\n\n")) this.append("\n");  // One blank line.
+    // One blank line. The end is read from the last segments: the whole text may be long.
+    if (!this.welcome && !this.segments.slice(-2).map(([text]) => text).join("").endsWith("\n\n")) this.append("\n");
     const header = `● cell ${number} · ${summary}`;
     this.append(header + "\n", "cell");
     // Measured after appending, which may first clear the welcome text.
-    this.currentCell = { at: this.log.textStorage().length() - header.length - 1, length: header.length };
+    this.currentCell = { at: this.log.textStorage().length() - header.length - 1, length: header.length,
+      segment: this.segments.at(-1) };
     this.setState(`Running · cell ${number}`, summary);
   }
 
   finishCell(result) {
-    const { at, length } = this.currentCell;
+    const { at, length, segment } = this.currentCell;
     const storage = this.log.textStorage();
     if (result.error) storage.addAttribute_value_range_("NSColor", COLORS.error, [at, length]);
     storage.replaceCharactersInRange_withAttributedString_([at, 1],
       this.styled(result.error ? "✗" : "✓", result.error ? "error" : "cell"));
+    if (segment) {  // Missing if a cell replaced currentCell.
+      segment[0] = (result.error ? "✗" : "✓") + segment[0].slice(1);
+      if (result.error) segment[1] = "error";
+      this.unsaved = true;
+    }
     if (result.error) this.append(result.error + "\n", "error");
     this.setState(result.quit ? "Ended" : "Ready");
   }
@@ -356,6 +422,7 @@ class Console {
     this.speedLabel.setAttributedText_(this.styled(`↓ ${speed.toFixed(0)} tok/s`, "speed", 12));
     const busy = this.modelRequests > 0 || this.state.startsWith("Running");
     if (busy !== this.spinner.isAnimating()) busy ? this.spinner.startAnimating() : this.spinner.stopAnimating();
+    if (this.unsaved && now - this.savedAt >= 2000) this.save();
   }
 
   // The next line the user sends; `input` in cells.
@@ -373,8 +440,9 @@ class Console {
     const shown = this.secret ? "•".repeat(Math.min(text.length, 12)) : text;
     Object.assign(this, { secret: false, fallback: null });
     // Right under the question it answers, then a blank line.
-    this.append(` › ${shown} \n`, "user", { NSBackgroundColor: COLORS.composer, NSFont: mono(13, 0.4) });  // Bold.
+    this.append(` › ${shown} \n`, "user", "user");
     this.append("\n");
+    this.save();  // Kept even if the app ends before the reply.
     this.setState("Running");
     this.waiting.shift()(text);
   }
@@ -405,6 +473,8 @@ class Console {
 
   show() {
     this.window.makeKeyAndVisible();
+    if (this.scrollPending) this.scrollToEnd();
+    this.scrollPending = false;
   }
 
   hide() {
@@ -528,6 +598,43 @@ function saveCell(record) {
   } catch (e) {
     logApp(`Could not save to history.jsonl, kept for the next cell: ${e}`);
   }
+}
+
+// The records in HISTORY; a line that does not parse is left out.
+function readHistory() {
+  const records = [];
+  for (const line of (readText(HISTORY) ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const { code = "", summary = "", output = "", error = null } = JSON.parse(line);
+      records.push({ code, summary, output, error });
+    } catch {}
+  }
+  return records;
+}
+
+// The console's conversation, kept across launches like the official app's, so a relaunch looks like none happened.
+const SUPPORT = files.URLsForDirectory_inDomains_(14, 1)[0].path();  // Application Support; reset deletes it.
+const TRANSCRIPT = SUPPORT + "/console.json";
+const TRANSCRIPT_LIMIT = 2000000;  // Characters shown at launch, the newest; UITextView slows beyond.
+const BOOTSTRAP_SUMMARY = "Run the bootstrap cell.";  // core.js's summary for a run's first cell.
+
+// The conversation as the console showed it, rebuilt from HISTORY when there is no TRANSCRIPT yet.
+// ponytail: the user's lines were not kept before TRANSCRIPT, so they are missing.
+function historySegments(records) {
+  const segments = [];
+  let number = 0;
+  for (const { summary, output, error } of records) {
+    if (summary === BOOTSTRAP_SUMMARY) number = 0;
+    if (segments.length && !segments.slice(-2).map(([text]) => text).join("").endsWith("\n\n")) {
+      segments.push(["\n", "text", "plain"]);
+    }
+    segments.push([`${error ? "✗" : "✓"} cell ${number} · ${summary}\n`, error ? "error" : "cell", "plain"]);
+    if (output) segments.push([output, "text", "output"]);
+    if (error) segments.push([error + "\n", "error", "plain"]);
+    number += 1;
+  }
+  return segments;
 }
 
 // The model settings, kept in the keychain by setup() at first launch rather than built into the app.
@@ -713,10 +820,11 @@ const EXCLUDED_NAMES = new Set(["task", "call_me", "call_llm_api", "quit", "hist
 
 const appConsole = new Console();
 const consoleWindow = appConsole.window;
+let quietBoot = false;  // boot.js prints only to app_log, so a restored conversation goes on as it was.
 const env = new JSEnv({
   write: (text) => {
     if (env.capture === null || callbackDepth > 0) logApp(text);  // The app's own output, not a cell's.
-    appConsole.write(text);
+    if (!quietBoot) appConsole.write(text);
   },
   readInput: (prompt) => appConsole.input(prompt),
 });
@@ -767,7 +875,9 @@ async function boot() {
   // Counted before it runs and saved now, so a crash still counts; cleared once it has run for a while.
   defaults.setInteger_forKey_(failures + 1, FAILURES);
   defaults.synchronize();
+  quietBoot = !appConsole.welcome;
   const result = await env.execute(code);
+  quietBoot = false;
   logApp(`boot.js ${result.error ? "failed" : "ran"}\n${result.output}${result.error ?? ""}`);
   if (result.error) return env.write(`boot.js failed:\n${result.error}\n`);
   appConsole.hide();
@@ -798,23 +908,45 @@ async function setup() {
 
 // The agent reads each task with input(); when a run ends, a new one waits for the next message.
 let runningCell = null;  // The running cell's code and summary, for its line in HISTORY.
+// A relaunch shows the conversation as it was and continues the run it ended: the run's cells since its bootstrap
+// cell are its history again, and a bootstrap cell that shows nothing waits for the next message.
 async function main() {
-  const count = readText(HISTORY)?.trim().split("\n").length ?? 0;
-  if (count) env.write(`${count} cells of history from earlier launches in ${HISTORY}\n`);
+  const records = readHistory();
+  let kept = null;
+  try {
+    kept = JSON.parse(readText(TRANSCRIPT) ?? "null");
+  } catch (e) {
+    logApp(`Could not read ${TRANSCRIPT}, rebuilt from history: ${e}`);
+  }
+  if (!kept && records.length) kept = { segments: historySegments(records), ended: false };
+  if (kept) appConsole.restore(kept.segments, kept.ended);
+  const start = records.findLastIndex((record) => record.summary === BOOTSTRAP_SUMMARY);
+  let resumed = kept && !kept.ended && start >= 0 ? records.slice(start) : [];
   if (!CONFIG) await setup();
   await boot();
   while (true) {
+    let hidden = resumed.length > 0;  // The resumed run's bootstrap cell, shown only if it fails.
+    appConsole.setEnded(false);
     await agent.run(BOOTSTRAP, {
       env,
+      history: resumed,
       onCell: (number, summary, code) => {
         runningCell = { code, summary };
-        appConsole.addCell(number, summary);
+        if (!hidden) appConsole.addCell(number, summary);
       },
       onResult: (number, result) => {
-        saveCell({ ...runningCell, output: result.output, error: result.error });
+        if (hidden) {
+          hidden = false;
+          if (!result.error) return;  // Not one of the run's cells, so not in HISTORY either.
+          appConsole.addCell(number, runningCell.summary);
+        } else {
+          saveCell({ ...runningCell, output: result.output, error: result.error });
+        }
         appConsole.finishCell(result);
       },
     });
+    resumed = [];
+    appConsole.setEnded(true);
     env.write("The run ended. Send a message to start a new one.\n");
   }
 }

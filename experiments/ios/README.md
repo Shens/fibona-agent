@@ -24,7 +24,7 @@ For a connected iPhone, run `make device TEAM=<your-development-team>`.
 This uses Xcode to provision, sign, install and launch the app.
 Edit `Fibona.xcodeproj` in Xcode to change the project.
 
-In the app, the console is always one tap away on the floating spiral button. Drag it to move it; hold it to reset Fibona to its first launch, deleting everything it built and the model settings. `boot.js` in the app's Documents directory runs at every launch. If `boot.js` fails to start 3 launches in a row, it is moved to `boot.failed.js` and the app starts with only the console. Every cell is appended to `history.jsonl` there, across launches; at launch the console only says how many it holds.
+In the app, the console is always one tap away on the floating spiral button. Drag it to move it; hold it to reset Fibona to its first launch, deleting everything it built and the model settings. `boot.js` in the app's Documents directory runs at every launch. If `boot.js` fails to start 3 launches in a row, it is moved to `boot.failed.js` and the app starts with only the console. Every cell is appended to `history.jsonl` there, across launches. The console keeps its conversation in `Library/Application Support/console.json`, so when the app is ended and opened again it looks as it was, scrolled to the end, and the run goes on with its cells as history; a phone without that file yet rebuilds it from `history.jsonl`, without the user's earlier messages, which were not kept.
 
 ### Alongside the official Fibona app
 
