@@ -233,8 +233,12 @@ Repair the failure and continue the program.
   // observes each cell before it runs; onResult(number, result) receives its validated result, including the
   // cell that quits. Resolves when a cell quits, or when a repair cell fails too: unlike core/agent.py, which
   // retries without limit, so an unreachable model cannot spin the loop. Interruptions are not supported.
-  async run(bootstrapCell, { env = new JSEnv(), onCell, onResult } = {}) {
+  // `history`, the records of a run the app ended, continues that run: its cells keep their numbers, and the
+  // bootstrap cell, which only sets up the session again, is not recorded among them.
+  async run(bootstrapCell, { env = new JSEnv(), onCell, onResult, history = [] } = {}) {
     const memory = new Memory();
+    memory.history.push(...history);
+    let resuming = history.length > 0;
     let code = bootstrapCell;
     let summary = "Run the bootstrap cell.";
     let repairing = false;
@@ -260,7 +264,8 @@ Repair the failure and continue the program.
       }
       onResult?.(memory.cells, result);
       if (result.quit) return;
-      memory.record(code, summary, result);
+      if (!resuming) memory.record(code, summary, result);
+      resuming = false;
 
       if (result.error === null) {
         repairing = false;
