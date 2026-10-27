@@ -27,10 +27,10 @@ $(ICON): public/beta-icon.svg
 	rsvg-convert -w 1024 -h 1024 --background-color '#FAF8F4' $< -o build/icon.png
 	sips -s format jpeg build/icon.png --out build/icon.jpg >/dev/null && sips -s format png build/icon.jpg --out $@ >/dev/null
 
-# The floating button's image, from the same SVG: 48 points at 3x.
+# The floating button's image, the same β as the app icon: 48 points at 3x.
 HANDLE = Assets.xcassets/Handle.imageset/handle.png
-$(HANDLE): public/favicon.svg
-	rsvg-convert -w 144 -h 144 --background-color '#FAF8F4' $< -o $@
+$(HANDLE): public/beta-icon.svg
+	rsvg-convert -w 144 -h 144 $< -o $@
 
 build: $(ICON) $(HANDLE)  # The app for the simulator. The model settings are asked for at first launch.
 	mkdir -p $(WIDGET)
