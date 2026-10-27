@@ -488,8 +488,11 @@ globalThis.setTimeout = (fn, ms = 0, ...args) =>
   ObjC.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(ms / 1000, false, ObjC.block("v@", () => fn(...args)));
 globalThis.clearTimeout = (timer) => timer?.invalidate();
 
+// Requests carry the model API key in a header, so neither session keeps anything on disk: a default session would
+// store each request, header and all, in Library/Caches. What earlier builds stored there goes at every launch.
+ObjC.NSURLCache.sharedURLCache().removeAllCachedResponses();
 const session = ObjC.NSURLSession.sessionWithConfiguration_delegate_delegateQueue_(
-  ObjC.NSURLSessionConfiguration.defaultSessionConfiguration(), null, ObjC.NSOperationQueue.mainQueue(),
+  ObjC.NSURLSessionConfiguration.ephemeralSessionConfiguration(), null, ObjC.NSOperationQueue.mainQueue(),
 );
 
 globalThis.http = (url, { method = "GET", headers = {}, body = null } = {}) =>
@@ -719,7 +722,7 @@ function streamResponse(body) {
       },
     }, ["NSURLSessionDataDelegate"]);
     // The session holds the delegate until its task ends. Without a network, the task waits for one instead of failing.
-    const config = ObjC.NSURLSessionConfiguration.defaultSessionConfiguration();
+    const config = ObjC.NSURLSessionConfiguration.ephemeralSessionConfiguration();
     config.setWaitsForConnectivity_(true);
     const session = ObjC.NSURLSession.sessionWithConfiguration_delegate_delegateQueue_(
       config, delegate, ObjC.NSOperationQueue.mainQueue());
