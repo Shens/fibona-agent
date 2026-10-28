@@ -704,7 +704,7 @@ let CONFIG = JSON.parse(native.keychainGet(SETTINGS) ?? "null");  // {baseURL, a
 async function request(body) {
   for (let attempt = 1; ; attempt++) {
     try {
-      return await streamResponse(body);
+      return await streamResponse(body, isCodex() ? await codexToken() : null);
     } catch (e) {
       if (e.networkLost && attempt <= 3) {
         logApp(`Model request lost (${e.message}); sending it again, attempt ${attempt + 1}.`);
@@ -753,16 +753,160 @@ function rateLimit(task, raw) {
   return { retryAfter: wait == null ? null : Math.max(0, wait) };
 }
 
+// --- CHATGPT ACCOUNT -----------------------------------------------------------------------------------
+// Instead of an API key, a ChatGPT account can be signed in with the Codex login (OAuth with PKCE); requests then go
+// to ChatGPT's Codex Responses endpoint with the account's token, which is refreshed before it expires. The flow,
+// endpoint and headers follow pi-ai's openai-codex provider. A profile whose base URL is CODEX.base uses it.
+const CODEX = { client: "app_EMoamEEZ73f0CkXaXp7hrann", authorize: "https://auth.openai.com/oauth/authorize",
+  token: "https://auth.openai.com/oauth/token", redirect: "http://localhost:1455/auth/callback",
+  base: "https://chatgpt.com/backend-api/codex", account: "chatgpt account" };  // account: Keychain account.
+const isCodex = () => CONFIG?.baseURL === CODEX.base;
+
+// SHA-256 of a byte array, for the PKCE challenge; the bridge reaches no C hashing function.
+function sha256(bytes) {
+  const primes = [];
+  for (let n = 2; primes.length < 64; n++) if (primes.every((p) => n % p)) primes.push(n);
+  const frac = (x) => ((x - Math.floor(x)) * 2 ** 32) >>> 0;
+  const K = primes.map((p) => frac(Math.cbrt(p)));
+  let H = primes.slice(0, 8).map((p) => frac(Math.sqrt(p)));
+  const words = new Array(((bytes.length + 9 + 63) >> 6) << 4).fill(0);
+  bytes.forEach((b, i) => { words[i >> 2] |= b << (24 - (i % 4) * 8); });
+  words[bytes.length >> 2] |= 0x80 << (24 - (bytes.length % 4) * 8);
+  words[words.length - 1] = bytes.length * 8;
+  const r = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let i = 0; i < words.length; i += 16) {
+    const w = words.slice(i, i + 16);
+    for (let t = 16; t < 64; t++) {
+      const [a, b] = [w[t - 15], w[t - 2]];
+      w[t] = (w[t - 16] + (r(a, 7) ^ r(a, 18) ^ (a >>> 3)) + w[t - 7] + (r(b, 17) ^ r(b, 19) ^ (b >>> 10))) | 0;
+    }
+    let [a, b, c, d, e, f, g, h] = H;
+    for (let t = 0; t < 64; t++) {
+      const t1 = (h + (r(e, 6) ^ r(e, 11) ^ r(e, 25)) + ((e & f) ^ (~e & g)) + K[t] + w[t]) | 0;
+      const t2 = ((r(a, 2) ^ r(a, 13) ^ r(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+      [h, g, f, e, d, c, b, a] = [g, f, e, (d + t1) | 0, c, b, a, (t1 + t2) | 0];
+    }
+    H = H.map((x, j) => (x + [a, b, c, d, e, f, g, h][j]) | 0);
+  }
+  return H.flatMap((x) => [x >>> 24, (x >>> 16) & 255, (x >>> 8) & 255, x & 255]);
+}
+
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const base64url = (bytes) => bytes.reduce((out, _, i) => {
+  if (i % 3) return out;
+  const n = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+  return out + [18, 12, 6, 0].slice(0, Math.min(4, bytes.length - i + 1)).map((s) => B64[(n >> s) & 63]).join("");
+}, "");
+// The ChatGPT account id, from the access token's claims.
+function jwtAccount(token) {
+  const part = String(token).split(".")[1] ?? "";
+  let bits = 0, value = 0, text = "";
+  for (const ch of part.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")) {
+    value = (value << 6) | B64.indexOf(ch); bits += 6;
+    if (bits >= 8) { bits -= 8; text += String.fromCharCode((value >> bits) & 255); }
+  }
+  try { return JSON.parse(text)?.["https://api.openai.com/auth"]?.chatgpt_account_id ?? null; } catch { return null; }
+}
+const randomString = () => [1, 2, 3].map(() => String(ObjC.NSUUID.UUID().UUIDString())).join("").replaceAll("-", "").toLowerCase();
+const form = (fields) => Object.entries(fields).map(([k, v]) => k + "=" + encodeURIComponent(v)).join("&");
+
+async function codexTokens(fields) {
+  const { status, text } = await http(CODEX.token, { method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form({ client_id: CODEX.client, ...fields }) });
+  const json = (() => { try { return JSON.parse(text); } catch { return {}; } })();
+  if (status !== 200 || !json.access_token || !json.refresh_token) throw new Error(`ChatGPT sign-in failed: HTTP ${status}: ${text.slice(0, 300)}`);
+  const saved = { access: json.access_token, refresh: json.refresh_token, expires: Date.now() + (json.expires_in ?? 3600) * 1000,
+    accountId: jwtAccount(json.access_token) };
+  if (!saved.accountId) throw new Error("ChatGPT sign-in failed: the token names no ChatGPT account.");
+  if (native.keychainSet(CODEX.account, JSON.stringify(saved)) !== 0) throw new Error("ChatGPT sign-in could not be saved in the Keychain.");
+  return saved;
+}
+
+// The signed-in account's token, refreshed when it ends within a minute.
+async function codexToken() {
+  const saved = JSON.parse(native.keychainGet(CODEX.account) ?? "null");
+  if (!saved) throw new Error("No ChatGPT account is signed in; sign in from the model settings.");
+  if (saved.expires - Date.now() > 60000) return saved;
+  return codexTokens({ grant_type: "refresh_token", refresh_token: saved.refresh });
+}
+
+// Signs a ChatGPT account in, in a web view over the app. The sign-in ends by sending the browser to CODEX.redirect,
+// where nothing listens: the web view is watched for that address, and the code in it is exchanged for tokens.
+// Resolves to {accountId} once the tokens are in the Keychain.
+globalThis.codexLogin = async function codexLogin() {
+  const verifier = randomString(), state = randomString().slice(0, 32);
+  const url = CODEX.authorize + "?" + form({ response_type: "code", client_id: CODEX.client, redirect_uri: CODEX.redirect,
+    scope: "openid profile email offline_access", state, code_challenge_method: "S256",
+    code_challenge: base64url(sha256([...verifier].map((c) => c.charCodeAt(0)))),
+    id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "fibona" });
+  const code = await new Promise((resolve, reject) => {
+    const win = ObjC.UIWindow.alloc().initWithWindowScene_(appConsole.window.windowScene());
+    win.setWindowLevel_(10);
+    const vc = ObjC.UIViewController.new();
+    win.setRootViewController_(vc);
+    const root = vc.view(), [, , w, h] = root.bounds(), top = appConsole.window.safeAreaInsets()[0] || 59;
+    root.setBackgroundColor_(ObjC.UIColor.systemBackgroundColor());
+    const web = ObjC.WKWebView.alloc().initWithFrame_configuration_([0, top + 44, w, h - top - 44], ObjC.WKWebViewConfiguration.new());
+    root.addSubview_(web);
+    const cancel = ObjC.UIButton.buttonWithType_(1);
+    cancel.setTitle_forState_("取消", 0);
+    cancel.setFrame_([12, top, 80, 44]);
+    root.addSubview_(cancel);
+    const title = ObjC.UILabel.alloc().initWithFrame_([92, top, w - 184, 44]);
+    title.setText_("登录 ChatGPT");
+    title.setTextAlignment_(1);
+    root.addSubview_(title);
+    let ended = false;
+    const end = (settle, value) => {
+      if (ended) return;
+      ended = true;
+      web.stopLoading();
+      win.setHidden_(true);
+      setTimeout(() => { codexLogin.held = null; }, 1000);
+      settle(value);
+    };
+    const check = (address) => {
+      address = String(address ?? "");
+      if (!address.startsWith(CODEX.redirect)) return;
+      const query = Object.fromEntries((address.split("?")[1] ?? "").split("&").map((kv) => kv.split("=").map(decodeURIComponent)));
+      if (query.state !== state || !query.code) end(reject, new Error("ChatGPT sign-in did not finish: " + (query.error_description || query.error || "no code")));
+      else end(resolve, query.code);
+    };
+    const current = () => web.URL()?.absoluteString();
+    const delegate = ObjC.delegate({
+      webView_didStartProvisionalNavigation_: () => check(current()),
+      webView_didReceiveServerRedirectForProvisionalNavigation_: () => check(current()),
+      webView_didFailProvisionalNavigation_withError_: (view, nav, error) => check(error.userInfo()?.NSErrorFailingURLStringKey ?? current()),
+      webView_didFinishNavigation_: () => check(current()),
+    }, ["WKNavigationDelegate"]);
+    const target = ObjC.delegate({ cancel: () => end(reject, new Error("ChatGPT sign-in was cancelled.")) });
+    cancel.addTarget_action_forControlEvents_(target, "cancel", 64);
+    codexLogin.held = { win, web, delegate, target };  // UIKit holds these weakly.
+    web.setNavigationDelegate_(delegate);
+    web.loadRequest_(ObjC.NSURLRequest.requestWithURL_(ObjC.NSURL.URLWithString_(url)));
+    win.makeKeyAndVisible();
+  });
+  const saved = await codexTokens({ grant_type: "authorization_code", code, code_verifier: verifier, redirect_uri: CODEX.redirect });
+  return { accountId: saved.accountId, base: CODEX.base };
+};
+
 // NSURLErrorDomain codes for a connection that failed or dropped: timed out, cannot connect, connection lost, offline.
 const NETWORK_LOST = [-1001, -1004, -1005, -1009];
 
-function streamResponse(body) {
+function streamResponse(body, codex = null) {
   return new Promise((resolve, reject) => {
     const req = ObjC.NSMutableURLRequest.requestWithURL_(ObjC.NSURL.URLWithString_(CONFIG.baseURL + "/responses"));
     req.setHTTPMethod_("POST");
     req.setTimeoutInterval_(600);
     req.setValue_forHTTPHeaderField_("application/json", "Content-Type");
-    req.setValue_forHTTPHeaderField_("Bearer " + CONFIG.apiKey, "Authorization");
+    req.setValue_forHTTPHeaderField_("Bearer " + (codex ? codex.access : CONFIG.apiKey), "Authorization");
+    if (codex) {  // ChatGPT's Codex endpoint: the account, these headers, and no stored responses.
+      req.setValue_forHTTPHeaderField_(codex.accountId, "chatgpt-account-id");
+      req.setValue_forHTTPHeaderField_("responses=experimental", "OpenAI-Beta");
+      req.setValue_forHTTPHeaderField_("fibona", "originator");
+      req.setValue_forHTTPHeaderField_("text/event-stream", "Accept");
+      body = { ...body, store: false, instructions: body.instructions || "You are a helpful assistant." };
+    }
     req.setHTTPBody_(ObjC.send(JSON.stringify({ model: CONFIG.model, ...body, stream: true }), "dataUsingEncoding:", 4));
 
     const pending = ObjC.NSMutableData.new();  // Bytes not yet decoded: a chunk can end inside a UTF-8 character.

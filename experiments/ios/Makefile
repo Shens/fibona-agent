@@ -38,7 +38,7 @@ build: $(ICON) $(HANDLE)  # The app for the simulator. The model settings are as
 	printf '%s' '<plist version="1.0"><dict><key>com.apple.security.application-groups</key><array><string>group.ai.fibona.ios</string></array></dict></plist>' > build/group.entitlements
 	xcrun --sdk iphonesimulator clang -fobjc-arc -target $(TARGET) -isysroot $(SDK) -c main.m -o build/main.o
 	xcrun --sdk iphonesimulator swiftc -target $(TARGET) -sdk $(SDK) -parse-as-library $(ENTITLED) \
-	  -framework UIKit -framework JavaScriptCore -framework Security -framework BackgroundTasks -o $(APP)/Fibona build/main.o FBWidget.swift
+	  -framework UIKit -framework JavaScriptCore -framework Security -framework BackgroundTasks -framework WebKit -o $(APP)/Fibona build/main.o FBWidget.swift
 	# ponytail: no AppIntents metadata, so the widget's tap regions do nothing here; `make device` builds it with Xcode.
 	xcrun --sdk iphonesimulator swiftc -target $(TARGET) -sdk $(SDK) -parse-as-library -application-extension -Xlinker -e -Xlinker _NSExtensionMain $(ENTITLED) \
 	  -o $(WIDGET)/Widget widget/Widget.swift

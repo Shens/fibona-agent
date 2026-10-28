@@ -253,6 +253,8 @@
 					Security,
 					"-framework",
 					BackgroundTasks,
+					"-framework",
+					WebKit,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE)";
 				PRODUCT_NAME = Fibona;
@@ -288,6 +290,8 @@
 					Security,
 					"-framework",
 					BackgroundTasks,
+					"-framework",
+					WebKit,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE)";
 				PRODUCT_NAME = Fibona;
