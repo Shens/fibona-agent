@@ -786,45 +786,50 @@ const CODEX_UNSUPPORTED = ["background", "conversation", "max_output_tokens", "m
   "truncation", "user", "previous_response_id"];
 
 // Sign in with ChatGPT accepts function tools only inside a namespace or via `additional_tools`, not as bare
-// top-level `tools` entries: otherwise the request can complete with no function_call, and the agent loop ends
-// with "finished without choosing a next cell". See developers.openai.com/siwc/.../preview-limitations.
+// top-level `tools` entries. Match Codex: put a `functions` namespace inside an `additional_tools` input item,
+// and omit top-level `tools` entirely. See developers.openai.com/siwc/.../preview-limitations and Codex's
+// Responses Lite serialization (namespace description must be non-empty).
 function codexBody(body) {
   body = { ...body, store: false };
   CODEX_UNSUPPORTED.forEach((field) => delete body[field]);
   // Structured text formats (json_object / json_schema) are often rejected on this route.
   if (body.text?.format) delete body.text;
-  // Encrypted reasoning include has produced empty completed responses on this route; drop it for plan usage.
-  if (Array.isArray(body.include)) {
-    body.include = body.include.filter((x) => x !== "reasoning.encrypted_content");
-    if (!body.include.length) delete body.include;
-  }
+  // Plan usage has been returning completed responses with empty output when these are present with tools.
+  delete body.include;
+  delete body.reasoning;
+  delete body.parallel_tool_calls;
   const tools = body.tools;
-  if (!Array.isArray(tools) || !tools.length) return body;
-  const functions = [], rest = [];
+  if (!Array.isArray(tools) || !tools.length) { delete body.tools; return body; }
+  const functions = [];
   for (const tool of tools) {
     if (tool?.type === "function" || (tool?.name && !tool.type)) {
       const fn = { ...tool, type: "function" };
-      delete fn.strict;  // plan route is picky about strict schemas
+      delete fn.strict;
       functions.push(fn);
-    } else rest.push(tool);
+    }
   }
+  delete body.tools;  // Never send bare or mixed top-level tools on this route.
   if (!functions.length) return body;
-  // Supply functions through additional_tools (SIWC-supported) and keep a namespace in `tools` for hosts that
-  // still look there. Never leave bare function tools at the top level.
   const input = Array.isArray(body.input) ? body.input : [];
-  const already = input.some((item) => item && item.type === "additional_tools");
-  if (!already) {
+  if (!input.some((item) => item && item.type === "additional_tools")) {
     body.input = [
-      { type: "additional_tools", role: "developer", tools: functions },
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [{
+          type: "namespace",
+          name: "functions",
+          description: "Host tools for scheduling the next cell.",
+          tools: functions,
+        }],
+      },
       ...input,
     ];
   }
-  body.tools = [...rest, {
-    type: "namespace",
-    name: "functions",
-    description: "Host tools for scheduling the next cell.",
-    tools: functions,
-  }];
+  // Prefer an exact function force when waking the agent; "required" alone still yielded empty output[].
+  if (body.tool_choice === "required" && functions.some((f) => f.name === "set_next_cell")) {
+    body.tool_choice = { type: "function", name: "set_next_cell" };
+  }
   return body;
 }
 
@@ -1028,10 +1033,19 @@ function streamResponse(body, cfg, codex = null) {
       if (e.type?.endsWith(".delta") && typeof e.delta === "string") {
         appConsole.modelTokens(encodeURIComponent(e.delta).replace(/%../g, "x").length / 4);  // UTF-8 bytes / 4
       } else if (e.type === "response.completed") {
-        const response = withOutputText(e.response);
+        const response = withOutputText(e.response ?? {});
         if (codex) {
           const kinds = (response.output ?? []).map((o) => o.type + (o.name ? ":" + o.name : ""));
-          logApp(`chatgpt response: [${kinds.join(", ")}] text=${JSON.stringify((response.output_text || "").slice(0, 160))}`);
+          const note = `chatgpt completed status=${response.status} id=${response.id || "?"} output=[${kinds.join(", ")}] `
+            + `text=${JSON.stringify((response.output_text || "").slice(0, 120))} rawTail=${JSON.stringify(raw.slice(-800))}`;
+          logApp(note);
+          try { print(note); } catch {}
+          // Empty completed responses were the ChatGPT-OAuth failure mode; surface the wire body instead of
+          // pretending the mind answered.
+          if (!(response.output && response.output.length)) {
+            settle(reject, new Error(`ChatGPT plan returned empty output. ${note}`));
+            return;
+          }
         }
         settle(resolve, response);
       } else if (e.type === "response.incomplete") {
