@@ -753,7 +753,9 @@ async function pause(ms) {
 // For an HTTP 429: whether waiting can help (not when the balance or budget is used up), and how long the provider
 // asks to wait, in seconds, from Retry-After, X-RateLimit-Reset (seconds, or a Unix time) or the message.
 function rateLimit(task, raw) {
-  if (/insufficient_quota|budget|balance|billing|credit/i.test(raw) && !/rate.?limit|RPM|TPM/i.test(raw)) return null;
+  // Plan-usage and balance exhaustion: waiting will not help. App-specific ChatGPT limits use the same idea.
+  if (/insufficient_quota|budget|balance|billing|credit|subscription_sharing_usage_limit/i.test(raw)
+      && !/rate.?limit|RPM|TPM/i.test(raw)) return null;
   const header = (name) => {
     try {
       return Number(task.response().valueForHTTPHeaderField_(name)) || null;
@@ -782,6 +784,31 @@ const CODEX = { authorize: "https://auth.openai.com/api/accounts/authorize", tok
 const CODEX_UNSUPPORTED = ["background", "conversation", "max_output_tokens", "max_tool_calls", "metadata", "moderation",
   "multi_agent", "prompt", "prompt_cache_retention", "safety_identifier", "temperature", "top_logprobs", "top_p",
   "truncation", "user", "previous_response_id"];
+
+// Sign in with ChatGPT accepts function tools only inside a namespace (or via additional_tools), not as bare
+// top-level `tools` entries: otherwise the request can complete with no function_call, and the agent loop ends
+// with "finished without choosing a next cell". See developers.openai.com/siwc/.../preview-limitations.
+function codexBody(body) {
+  body = { ...body, store: false };
+  CODEX_UNSUPPORTED.forEach((field) => delete body[field]);
+  // Structured text formats (json_object / json_schema) are often rejected on this route.
+  if (body.text?.format) delete body.text;
+  const tools = body.tools;
+  if (!Array.isArray(tools) || !tools.length) return body;
+  const functions = [], rest = [];
+  for (const tool of tools) {
+    if (tool?.type === "function" || (tool?.name && !tool.type)) functions.push({ ...tool, type: "function" });
+    else rest.push(tool);
+  }
+  if (!functions.length) return body;
+  body.tools = [...rest, {
+    type: "namespace",
+    name: "functions",
+    description: "Host tools for scheduling the next cell.",
+    tools: functions,
+  }];
+  return body;
+}
 
 // SHA-256 of a byte array, for the PKCE challenge; the bridge reaches no C hashing function.
 function sha256(bytes) {
@@ -956,10 +983,7 @@ function streamResponse(body, cfg, codex = null) {
     req.setTimeoutInterval_(600);
     req.setValue_forHTTPHeaderField_("application/json", "Content-Type");
     req.setValue_forHTTPHeaderField_("Bearer " + (codex ? codex.access : cfg.apiKey), "Authorization");
-    if (codex) {  // ChatGPT plan usage: no stored responses, and none of the fields that route rejects.
-      body = { ...body, store: false };
-      CODEX_UNSUPPORTED.forEach((field) => delete body[field]);
-    }
+    if (codex) body = codexBody(body);  // ChatGPT plan usage: strip rejected fields; namespace function tools.
     req.setHTTPBody_(ObjC.send(JSON.stringify({ model: cfg.model, ...body, stream: true }), "dataUsingEncoding:", 4));
 
     const pending = ObjC.NSMutableData.new();  // Bytes not yet decoded: a chunk can end inside a UTF-8 character.
@@ -974,18 +998,30 @@ function streamResponse(body, cfg, codex = null) {
       appConsole.modelEnded();
       fn(value);
     };
+    const failResponse = (err) => {
+      const code = err?.code ? ` [${err.code}]` : "";
+      const msg = err?.message ?? (typeof err === "string" ? err : null) ?? JSON.stringify(err ?? "Model request failed.");
+      return new Error(msg + code);
+    };
     const handle = (event) => {
       const data = event.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
       if (!data || data === "[DONE]") return;
       const e = JSON.parse(data);
       if (e.type?.endsWith(".delta") && typeof e.delta === "string") {
         appConsole.modelTokens(encodeURIComponent(e.delta).replace(/%../g, "x").length / 4);  // UTF-8 bytes / 4
-      } else if (e.type === "response.completed" || e.type === "response.incomplete") {
+      } else if (e.type === "response.completed") {
         settle(resolve, withOutputText(e.response));
+      } else if (e.type === "response.incomplete") {
+        // Plan usage and other soft stops arrive here; treating them as success hid the real reason and left
+        // the agent with no set_next_cell. Fail with the incomplete reason and any output text.
+        const response = withOutputText(e.response ?? {});
+        const reason = response.incomplete_details?.reason ?? "incomplete";
+        const text = (response.output_text || "").trim();
+        settle(reject, new Error(`Model response incomplete (${reason})${text ? ": " + text.slice(0, 500) : ""}`));
       } else if (e.type === "response.failed") {
-        settle(reject, new Error(e.response?.error?.message ?? "Model request failed."));
+        settle(reject, failResponse(e.response?.error));
       } else if (e.type === "error") {
-        settle(reject, new Error(e.message ?? JSON.stringify(e)));
+        settle(reject, failResponse(e.error ?? e));
       }
     };
     const delegate = ObjC.delegate({
@@ -1161,7 +1197,7 @@ function streamChat(body, cfg) {
 }
 
 function withOutputText(response) {
-  response.output_text = response.output.filter((o) => o.type === "message").flatMap((o) => o.content)
+  response.output_text = (response.output ?? []).filter((o) => o.type === "message").flatMap((o) => o.content ?? [])
     .filter((c) => c.type === "output_text").map((c) => c.text).join("");
   return response;
 }
