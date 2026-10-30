@@ -160,8 +160,9 @@ class Mind {
           const kinds = (response.output ?? []).map((o) => o.type + (o.name ? ":" + o.name : ""));
           const text = (response.output_text || "").trim();
           throw new Error(
-            `Model returned no set_next_cell (tool_choice=required). output=[${kinds.join(", ")}]`
-            + (text ? ` text=${text.slice(0, 400)}` : ""),
+            `Model returned no set_next_cell (forced). status=${response.status} output=[${kinds.join(", ")}]`
+            + (text ? ` text=${text.slice(0, 400)}` : "")
+            + (response.error ? ` error=${JSON.stringify(response.error).slice(0, 300)}` : ""),
           );
         }
         return response;  // A plain reply, or one of the caller's tools for it to answer.
