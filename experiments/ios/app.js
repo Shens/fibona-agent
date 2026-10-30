@@ -252,23 +252,9 @@ class Console {
     handle.layer().setShadowOpacity_(0.35);  // The default shadow color is black.
     handle.layer().setShadowRadius_(6);
     handle.layer().setShadowOffset_([0, 3]);
-    // Tap: console open → hide (back to GUI); GUI → page chat via fabChatOpen (#20).
-    // Documents registers globalThis.fabChatOpen; missing/false/'console' falls back to the console.
-    // Drag to move, hold to reset — unchanged.
+    // Tap to toggle the console, drag to move, hold to reset.
     this.handleTarget = ObjC.delegate({
-      toggle: () => {
-        if (!this.window.isHidden()) { this.hide(); return; }
-        try {
-          if (typeof globalThis.fabChatOpen === "function") {
-            const r = globalThis.fabChatOpen();
-            if (r === false || r === "console") this.show();
-            return;
-          }
-        } catch (e) {
-          try { logApp("fabChatOpen: " + e); } catch (e2) {}
-        }
-        this.show();
-      },
+      toggle: () => (this.window.isHidden() ? this.show() : this.hide()),
       drag_: (gesture) => this.drag(gesture),
       hold_: (gesture) => gesture.state() === 1 && this.confirmReset(),  // Began.
     });
