@@ -143,10 +143,31 @@ class Mind {
       include: [...new Set([...(body.include ?? []), "reasoning.encrypted_content"])],
     };
     let items = inputItems(input);
+    let scheduled = false;  // After one set_next_cell, allow a plain reply to end the wake.
     while (true) {
-      const response = await this.request({ ...body, input: items });
-      const host = response.output.find((c) => c.type === "function_call" && c.name === SET_NEXT_CELL.name);
-      if (!host) return response;  // A plain reply, or one of the caller's tools for it to answer.
+      // Force a tool call until the host tool has run once; ChatGPT plan usage otherwise often returns an
+      // empty completed response with no function_call.
+      const response = await this.request({
+        ...body,
+        input: items,
+        tool_choice: scheduled ? (body.tool_choice ?? "auto") : "required",
+      });
+      // Namespaced tools (ChatGPT plan) may arrive as "functions.set_next_cell" or keep the bare name.
+      const host = (response.output ?? []).find((c) => c.type === "function_call"
+        && (c.name === SET_NEXT_CELL.name || c.name?.endsWith("." + SET_NEXT_CELL.name)));
+      if (!host) {
+        if (!scheduled) {
+          const kinds = (response.output ?? []).map((o) => o.type + (o.name ? ":" + o.name : ""));
+          const text = (response.output_text || "").trim();
+          throw new Error(
+            `Model returned no set_next_cell (forced). status=${response.status} output=[${kinds.join(", ")}]`
+            + (text ? ` text=${text.slice(0, 400)}` : "")
+            + (response.error ? ` error=${JSON.stringify(response.error).slice(0, 300)}` : ""),
+          );
+        }
+        return response;  // A plain reply, or one of the caller's tools for it to answer.
+      }
+      scheduled = true;
       const output = { type: "function_call_output", call_id: host.call_id, output: runHostTool(host, submit) };
       // Replay every output item, including encrypted reasoning, without server-side storage.
       const replay = response.output.map((o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v != null)));
@@ -260,7 +281,11 @@ Repair the failure and continue the program.
       slot.close();
       result.quit ||= quitting;
       if (!result.quit && result.error === null && slot.code === null) {
-        result.error = "The cell finished without choosing a next cell via set_next_cell.";
+        // Prefer any text the cell already printed (repair cells print response.output_text); keep a clear label.
+        const hint = (result.output || "").trim().slice(0, 500);
+        result.error = hint
+          ? "The cell finished without choosing a next cell via set_next_cell.\n" + hint
+          : "The cell finished without choosing a next cell via set_next_cell.";
       }
       onResult?.(memory.cells, result);
       if (result.quit) return;

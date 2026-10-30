@@ -738,7 +738,9 @@ async function pause(ms) {
 // For an HTTP 429: whether waiting can help (not when the balance or budget is used up), and how long the provider
 // asks to wait, in seconds, from Retry-After, X-RateLimit-Reset (seconds, or a Unix time) or the message.
 function rateLimit(task, raw) {
-  if (/insufficient_quota|budget|balance|billing|credit/i.test(raw) && !/rate.?limit|RPM|TPM/i.test(raw)) return null;
+  // Plan-usage and balance exhaustion: waiting will not help. App-specific ChatGPT limits use the same idea.
+  if (/insufficient_quota|budget|balance|billing|credit|subscription_sharing_usage_limit/i.test(raw)
+      && !/rate.?limit|RPM|TPM/i.test(raw)) return null;
   const header = (name) => {
     try {
       return Number(task.response().valueForHTTPHeaderField_(name)) || null;
@@ -768,6 +770,54 @@ const isCodex = () => CONFIG?.apiKey === CODEX.marker;
 const CODEX_UNSUPPORTED = ["background", "conversation", "max_output_tokens", "max_tool_calls", "metadata", "moderation",
   "multi_agent", "prompt", "prompt_cache_retention", "safety_identifier", "temperature", "top_logprobs", "top_p",
   "truncation", "user", "previous_response_id"];
+
+// Sign in with ChatGPT accepts function tools only inside a namespace or via `additional_tools`, not as bare
+// top-level `tools` entries. Match Codex: put a `functions` namespace inside an `additional_tools` input item,
+// and omit top-level `tools` entirely. See developers.openai.com/siwc/.../preview-limitations and Codex's
+// Responses Lite serialization (namespace description must be non-empty).
+function codexBody(body) {
+  body = { ...body, store: false };
+  CODEX_UNSUPPORTED.forEach((field) => delete body[field]);
+  // Structured text formats (json_object / json_schema) are often rejected on this route.
+  if (body.text?.format) delete body.text;
+  // Plan usage has been returning completed responses with empty output when these are present with tools.
+  delete body.include;
+  delete body.reasoning;
+  delete body.parallel_tool_calls;
+  const tools = body.tools;
+  if (!Array.isArray(tools) || !tools.length) { delete body.tools; return body; }
+  const functions = [];
+  for (const tool of tools) {
+    if (tool?.type === "function" || (tool?.name && !tool.type)) {
+      const fn = { ...tool, type: "function" };
+      delete fn.strict;
+      functions.push(fn);
+    }
+  }
+  delete body.tools;  // Never send bare or mixed top-level tools on this route.
+  if (!functions.length) return body;
+  const input = Array.isArray(body.input) ? body.input : [];
+  if (!input.some((item) => item && item.type === "additional_tools")) {
+    body.input = [
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [{
+          type: "namespace",
+          name: "functions",
+          description: "Host tools for scheduling the next cell.",
+          tools: functions,
+        }],
+      },
+      ...input,
+    ];
+  }
+  // Prefer an exact function force when waking the agent; "required" alone still yielded empty output[].
+  if (body.tool_choice === "required" && functions.some((f) => f.name === "set_next_cell")) {
+    body.tool_choice = { type: "function", name: "set_next_cell" };
+  }
+  return body;
+}
 
 // SHA-256 of a byte array, for the PKCE challenge; the bridge reaches no C hashing function.
 function sha256(bytes) {
@@ -942,10 +992,7 @@ function streamResponse(body, codex = null) {
     req.setTimeoutInterval_(600);
     req.setValue_forHTTPHeaderField_("application/json", "Content-Type");
     req.setValue_forHTTPHeaderField_("Bearer " + (codex ? codex.access : CONFIG.apiKey), "Authorization");
-    if (codex) {  // ChatGPT plan usage: no stored responses, and none of the fields that route rejects.
-      body = { ...body, store: false };
-      CODEX_UNSUPPORTED.forEach((field) => delete body[field]);
-    }
+    if (codex) body = codexBody(body);  // ChatGPT plan usage: strip rejected fields; namespace function tools.
     req.setHTTPBody_(ObjC.send(JSON.stringify({ model: CONFIG.model, ...body, stream: true }), "dataUsingEncoding:", 4));
 
     const pending = ObjC.NSMutableData.new();  // Bytes not yet decoded: a chunk can end inside a UTF-8 character.
@@ -953,6 +1000,14 @@ function streamResponse(body, codex = null) {
     let raw = "";  // Everything received, for errors that are not events.
     let settled = false;
     let entry = null;  // For a stop to end this request; see stopCell.
+    // ChatGPT plan / Responses Lite often sends output items only as stream events; response.completed then
+    // arrives with output:[]. Rebuild from output_item.done (and argument finals) so set_next_cell is visible.
+    const streamed = [];  // sparse by output_index
+    const putItem = (index, item) => {
+      if (index == null || !item) return;
+      streamed[index] = item;
+    };
+    const streamedOutput = () => streamed.filter(Boolean);
     const settle = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -960,18 +1015,50 @@ function streamResponse(body, codex = null) {
       appConsole.modelEnded();
       fn(value);
     };
+    const failResponse = (err) => {
+      const code = err?.code ? ` [${err.code}]` : "";
+      const msg = err?.message ?? (typeof err === "string" ? err : null) ?? JSON.stringify(err ?? "Model request failed.");
+      return new Error(msg + code);
+    };
+    const finish = (response, ok) => {
+      response = response ?? {};
+      if (!(response.output && response.output.length) && streamedOutput().length) {
+        response.output = streamedOutput();
+      }
+      response = withOutputText(response);
+      if (codex) {
+        const kinds = (response.output ?? []).map((o) => o.type + (o.name ? ":" + o.name : ""));
+        logApp(`chatgpt ${ok ? "completed" : "incomplete"} status=${response.status} output=[${kinds.join(", ")}] `
+          + `text=${JSON.stringify((response.output_text || "").slice(0, 120))}`);
+      }
+      if (ok) settle(resolve, response);
+      else {
+        const reason = response.incomplete_details?.reason ?? "incomplete";
+        const text = (response.output_text || "").trim();
+        settle(reject, new Error(`Model response incomplete (${reason})${text ? ": " + text.slice(0, 500) : ""}`));
+      }
+    };
     const handle = (event) => {
       const data = event.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
       if (!data || data === "[DONE]") return;
       const e = JSON.parse(data);
       if (e.type?.endsWith(".delta") && typeof e.delta === "string") {
         appConsole.modelTokens(encodeURIComponent(e.delta).replace(/%../g, "x").length / 4);  // UTF-8 bytes / 4
-      } else if (e.type === "response.completed" || e.type === "response.incomplete") {
-        settle(resolve, withOutputText(e.response));
+      } else if (e.type === "response.output_item.added" || e.type === "response.output_item.done") {
+        putItem(e.output_index, e.item);
+      } else if (e.type === "response.function_call_arguments.done") {
+        const item = streamed[e.output_index] ?? { type: "function_call", id: e.item_id };
+        item.arguments = e.arguments ?? item.arguments;
+        if (e.item_id) item.id = item.id ?? e.item_id;
+        putItem(e.output_index, item);
+      } else if (e.type === "response.completed") {
+        finish(e.response ?? {}, true);
+      } else if (e.type === "response.incomplete") {
+        finish(e.response ?? {}, false);
       } else if (e.type === "response.failed") {
-        settle(reject, new Error(e.response?.error?.message ?? "Model request failed."));
+        settle(reject, failResponse(e.response?.error));
       } else if (e.type === "error") {
-        settle(reject, new Error(e.message ?? JSON.stringify(e)));
+        settle(reject, failResponse(e.error ?? e));
       }
     };
     const delegate = ObjC.delegate({
@@ -1018,7 +1105,7 @@ function streamResponse(body, codex = null) {
 }
 
 function withOutputText(response) {
-  response.output_text = response.output.filter((o) => o.type === "message").flatMap((o) => o.content)
+  response.output_text = (response.output ?? []).filter((o) => o.type === "message").flatMap((o) => o.content ?? [])
     .filter((c) => c.type === "output_text").map((c) => c.text).join("");
   return response;
 }
