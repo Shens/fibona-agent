@@ -145,7 +145,9 @@ class Mind {
     let items = inputItems(input);
     while (true) {
       const response = await this.request({ ...body, input: items });
-      const host = response.output.find((c) => c.type === "function_call" && c.name === SET_NEXT_CELL.name);
+      // Namespaced tools (ChatGPT plan) may arrive as "functions.set_next_cell" or keep the bare name.
+      const host = (response.output ?? []).find((c) => c.type === "function_call"
+        && (c.name === SET_NEXT_CELL.name || c.name?.endsWith("." + SET_NEXT_CELL.name)));
       if (!host) return response;  // A plain reply, or one of the caller's tools for it to answer.
       const output = { type: "function_call_output", call_id: host.call_id, output: runHostTool(host, submit) };
       // Replay every output item, including encrypted reasoning, without server-side storage.
@@ -260,7 +262,11 @@ Repair the failure and continue the program.
       slot.close();
       result.quit ||= quitting;
       if (!result.quit && result.error === null && slot.code === null) {
-        result.error = "The cell finished without choosing a next cell via set_next_cell.";
+        // Prefer any text the cell already printed (repair cells print response.output_text); keep a clear label.
+        const hint = (result.output || "").trim().slice(0, 500);
+        result.error = hint
+          ? "The cell finished without choosing a next cell via set_next_cell.\n" + hint
+          : "The cell finished without choosing a next cell via set_next_cell.";
       }
       onResult?.(memory.cells, result);
       if (result.quit) return;
