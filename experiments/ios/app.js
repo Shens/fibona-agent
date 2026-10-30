@@ -771,7 +771,7 @@ const CODEX_UNSUPPORTED = ["background", "conversation", "max_output_tokens", "m
   "multi_agent", "prompt", "prompt_cache_retention", "safety_identifier", "temperature", "top_logprobs", "top_p",
   "truncation", "user", "previous_response_id"];
 
-// Sign in with ChatGPT accepts function tools only inside a namespace (or via additional_tools), not as bare
+// Sign in with ChatGPT accepts function tools only inside a namespace or via `additional_tools`, not as bare
 // top-level `tools` entries: otherwise the request can complete with no function_call, and the agent loop ends
 // with "finished without choosing a next cell". See developers.openai.com/siwc/.../preview-limitations.
 function codexBody(body) {
@@ -779,14 +779,32 @@ function codexBody(body) {
   CODEX_UNSUPPORTED.forEach((field) => delete body[field]);
   // Structured text formats (json_object / json_schema) are often rejected on this route.
   if (body.text?.format) delete body.text;
+  // Encrypted reasoning include has produced empty completed responses on this route; drop it for plan usage.
+  if (Array.isArray(body.include)) {
+    body.include = body.include.filter((x) => x !== "reasoning.encrypted_content");
+    if (!body.include.length) delete body.include;
+  }
   const tools = body.tools;
   if (!Array.isArray(tools) || !tools.length) return body;
   const functions = [], rest = [];
   for (const tool of tools) {
-    if (tool?.type === "function" || (tool?.name && !tool.type)) functions.push({ ...tool, type: "function" });
-    else rest.push(tool);
+    if (tool?.type === "function" || (tool?.name && !tool.type)) {
+      const fn = { ...tool, type: "function" };
+      delete fn.strict;  // plan route is picky about strict schemas
+      functions.push(fn);
+    } else rest.push(tool);
   }
   if (!functions.length) return body;
+  // Supply functions through additional_tools (SIWC-supported) and keep a namespace in `tools` for hosts that
+  // still look there. Never leave bare function tools at the top level.
+  const input = Array.isArray(body.input) ? body.input : [];
+  const already = input.some((item) => item && item.type === "additional_tools");
+  if (!already) {
+    body.input = [
+      { type: "additional_tools", role: "developer", tools: functions },
+      ...input,
+    ];
+  }
   body.tools = [...rest, {
     type: "namespace",
     name: "functions",
@@ -996,7 +1014,12 @@ function streamResponse(body, codex = null) {
       if (e.type?.endsWith(".delta") && typeof e.delta === "string") {
         appConsole.modelTokens(encodeURIComponent(e.delta).replace(/%../g, "x").length / 4);  // UTF-8 bytes / 4
       } else if (e.type === "response.completed") {
-        settle(resolve, withOutputText(e.response));
+        const response = withOutputText(e.response);
+        if (codex) {
+          const kinds = (response.output ?? []).map((o) => o.type + (o.name ? ":" + o.name : ""));
+          logApp(`chatgpt response: [${kinds.join(", ")}] text=${JSON.stringify((response.output_text || "").slice(0, 160))}`);
+        }
+        settle(resolve, response);
       } else if (e.type === "response.incomplete") {
         // Plan usage and other soft stops arrive here; treating them as success hid the real reason and left
         // the agent with no set_next_cell. Fail with the incomplete reason and any output text.

@@ -143,12 +143,30 @@ class Mind {
       include: [...new Set([...(body.include ?? []), "reasoning.encrypted_content"])],
     };
     let items = inputItems(input);
+    let scheduled = false;  // After one set_next_cell, allow a plain reply to end the wake.
     while (true) {
-      const response = await this.request({ ...body, input: items });
+      // Force a tool call until the host tool has run once; ChatGPT plan usage otherwise often returns an
+      // empty completed response with no function_call.
+      const response = await this.request({
+        ...body,
+        input: items,
+        tool_choice: scheduled ? (body.tool_choice ?? "auto") : "required",
+      });
       // Namespaced tools (ChatGPT plan) may arrive as "functions.set_next_cell" or keep the bare name.
       const host = (response.output ?? []).find((c) => c.type === "function_call"
         && (c.name === SET_NEXT_CELL.name || c.name?.endsWith("." + SET_NEXT_CELL.name)));
-      if (!host) return response;  // A plain reply, or one of the caller's tools for it to answer.
+      if (!host) {
+        if (!scheduled) {
+          const kinds = (response.output ?? []).map((o) => o.type + (o.name ? ":" + o.name : ""));
+          const text = (response.output_text || "").trim();
+          throw new Error(
+            `Model returned no set_next_cell (tool_choice=required). output=[${kinds.join(", ")}]`
+            + (text ? ` text=${text.slice(0, 400)}` : ""),
+          );
+        }
+        return response;  // A plain reply, or one of the caller's tools for it to answer.
+      }
+      scheduled = true;
       const output = { type: "function_call_output", call_id: host.call_id, output: runHostTool(host, submit) };
       // Replay every output item, including encrypted reasoning, without server-side storage.
       const replay = response.output.map((o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v != null)));
