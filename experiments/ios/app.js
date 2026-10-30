@@ -693,18 +693,33 @@ function historySegments(records) {
 }
 
 // The model settings, kept in the keychain by setup() at first launch rather than built into the app.
-const SETTINGS = "model settings";  // Keychain account.
-let CONFIG = JSON.parse(native.keychainGet(SETTINGS) ?? "null");  // {baseURL, apiKey, model}
+const SETTINGS = "model settings";  // Keychain: shell / terminal Agent channel.
+const SETTINGS_APP = "model settings app";  // Keychain: App-side channel (Ideas, call_llm_api, …). #30
+let CONFIG = JSON.parse(native.keychainGet(SETTINGS) ?? "null");  // {baseURL, apiKey, model, protocol?}
+let CONFIG_APP = JSON.parse(native.keychainGet(SETTINGS_APP) ?? "null");  // null → fall back to CONFIG
 
-// One Responses API request to CONFIG; the model is CONFIG's unless the body names
-// one. It streams, like bootstraps/terminal, so the console can show progress, and resolves to the complete response.
-// One the network drops, as when the phone locks and the app is suspended mid-stream, is sent again, up to 3 times.
-// One the provider refuses for its rate limit (HTTP 429, but not a used-up balance) is sent again after the wait it
-// asks for, growing each time, up to 4 times: a low tier allows only a few requests a minute.
-async function request(body) {
+// #30: protocol is "responses" (default) or "chat". Channel "shell" = Agent; "app" = call_llm_api / GUI helpers.
+function configFor(channel = "shell") {
+  if (channel === "app" && CONFIG_APP && CONFIG_APP.baseURL) return CONFIG_APP;
+  return CONFIG;
+}
+function isCodexCfg(cfg) {
+  return cfg?.apiKey === CODEX.marker;
+}
+const isCodex = () => isCodexCfg(CONFIG);
+
+// One model request for the given channel. Streams; retries network drops and rate limits like before.
+async function request(body, channel = "shell") {
+  const cfg = configFor(channel);
+  if (!cfg) throw new Error("Model is not configured.");
+  const protocol = cfg.protocol === "chat" ? "chat" : "responses";
   for (let attempt = 1; ; attempt++) {
     try {
-      return await streamResponse(body, isCodex() ? await codexToken() : null);
+      if (protocol === "chat") {
+        if (isCodexCfg(cfg)) throw new Error("ChatGPT 账号档案请使用 Responses 协议。");
+        return await streamChat(body, cfg);
+      }
+      return await streamResponse(body, cfg, isCodexCfg(cfg) ? await codexToken() : null);
     } catch (e) {
       if (e.networkLost && attempt <= 3) {
         logApp(`Model request lost (${e.message}); sending it again, attempt ${attempt + 1}.`);
@@ -763,7 +778,6 @@ const CODEX = { authorize: "https://auth.openai.com/api/accounts/authorize", tok
   resource: "https://api.openai.com/v1", redirect: "http://127.0.0.1:1455/auth/callback", marker: "chatgpt-login",
   account: "chatgpt account", host: "chatgpt host id",  // Keychain accounts.
   scope: "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct" };
-const isCodex = () => CONFIG?.apiKey === CODEX.marker;
 // Fields the ChatGPT plan route rejects (its "Preview limitations" page); dropped from each request.
 const CODEX_UNSUPPORTED = ["background", "conversation", "max_output_tokens", "max_tool_calls", "metadata", "moderation",
   "multi_agent", "prompt", "prompt_cache_retention", "safety_identifier", "temperature", "top_logprobs", "top_p",
@@ -935,18 +949,18 @@ globalThis.codexLogin = async function codexLogin() {
 // NSURLErrorDomain codes for a connection that failed or dropped: timed out, cannot connect, connection lost, offline.
 const NETWORK_LOST = [-1001, -1004, -1005, -1009];
 
-function streamResponse(body, codex = null) {
+function streamResponse(body, cfg, codex = null) {
   return new Promise((resolve, reject) => {
-    const req = ObjC.NSMutableURLRequest.requestWithURL_(ObjC.NSURL.URLWithString_(CONFIG.baseURL + "/responses"));
+    const req = ObjC.NSMutableURLRequest.requestWithURL_(ObjC.NSURL.URLWithString_(cfg.baseURL + "/responses"));
     req.setHTTPMethod_("POST");
     req.setTimeoutInterval_(600);
     req.setValue_forHTTPHeaderField_("application/json", "Content-Type");
-    req.setValue_forHTTPHeaderField_("Bearer " + (codex ? codex.access : CONFIG.apiKey), "Authorization");
+    req.setValue_forHTTPHeaderField_("Bearer " + (codex ? codex.access : cfg.apiKey), "Authorization");
     if (codex) {  // ChatGPT plan usage: no stored responses, and none of the fields that route rejects.
       body = { ...body, store: false };
       CODEX_UNSUPPORTED.forEach((field) => delete body[field]);
     }
-    req.setHTTPBody_(ObjC.send(JSON.stringify({ model: CONFIG.model, ...body, stream: true }), "dataUsingEncoding:", 4));
+    req.setHTTPBody_(ObjC.send(JSON.stringify({ model: cfg.model, ...body, stream: true }), "dataUsingEncoding:", 4));
 
     const pending = ObjC.NSMutableData.new();  // Bytes not yet decoded: a chunk can end inside a UTF-8 character.
     let buffer = "";  // Text not yet split into server-sent events.
@@ -1005,6 +1019,135 @@ function streamResponse(body, codex = null) {
       },
     }, ["NSURLSessionDataDelegate"]);
     // The session holds the delegate until its task ends. Without a network, the task waits for one instead of failing.
+    const config = ObjC.NSURLSessionConfiguration.ephemeralSessionConfiguration();
+    config.setWaitsForConnectivity_(true);
+    const session = ObjC.NSURLSession.sessionWithConfiguration_delegate_delegateQueue_(
+      config, delegate, ObjC.NSOperationQueue.mainQueue());
+    appConsole.modelStarted();
+    const task = session.dataTaskWithRequest_(req);
+    entry = trackRequest(task, (e) => settle(reject, e));
+    if (entry) task.resume();
+    session.finishTasksAndInvalidate();
+  });
+}
+
+// #30 Chat Completions: enough for call_llm_api / Ideas (text + optional json_object). Agent tool loop stays on Responses for now.
+function contentText(content) {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map((p) => (typeof p === "string" ? p : (p?.text ?? p?.content ?? ""))).join("");
+  return String(content);
+}
+function responsesInputToChatMessages(body) {
+  const messages = [];
+  if (body.instructions) messages.push({ role: "system", content: String(body.instructions) });
+  const input = body.input;
+  if (typeof input === "string") messages.push({ role: "user", content: input });
+  else if (Array.isArray(input)) {
+    for (const item of input) {
+      if (!item) continue;
+      if (item.role && item.content != null) {
+        const role = item.role === "assistant" || item.role === "system" || item.role === "tool" ? item.role : "user";
+        messages.push({ role, content: contentText(item.content) });
+      } else if (item.type === "message" && item.content != null) {
+        const role = item.role === "assistant" || item.role === "system" ? item.role : "user";
+        messages.push({ role, content: contentText(item.content) });
+      }
+      // function_call / reasoning etc. skipped in phase 1
+    }
+  }
+  if (!messages.length) messages.push({ role: "user", content: "" });
+  return messages;
+}
+function responsesBodyToChat(body, cfg) {
+  const out = { model: body.model || cfg.model, messages: responsesInputToChatMessages(body), stream: true };
+  if (body.text?.format?.type === "json_object") out.response_format = { type: "json_object" };
+  if (body.max_output_tokens) out.max_tokens = body.max_output_tokens;
+  if (body.temperature != null) out.temperature = body.temperature;
+  return out;
+}
+function chatResponseFromText(text) {
+  const output_text = String(text || "");
+  return withOutputText({
+    status: "completed",
+    output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: output_text }] }],
+  });
+}
+function streamChat(body, cfg) {
+  return new Promise((resolve, reject) => {
+    const payload = responsesBodyToChat(body, cfg);
+    const req = ObjC.NSMutableURLRequest.requestWithURL_(ObjC.NSURL.URLWithString_(cfg.baseURL + "/chat/completions"));
+    req.setHTTPMethod_("POST");
+    req.setTimeoutInterval_(600);
+    req.setValue_forHTTPHeaderField_("application/json", "Content-Type");
+    req.setValue_forHTTPHeaderField_("Bearer " + cfg.apiKey, "Authorization");
+    req.setHTTPBody_(ObjC.send(JSON.stringify(payload), "dataUsingEncoding:", 4));
+
+    const pending = ObjC.NSMutableData.new();
+    let buffer = "", raw = "", full = "", settled = false, entry = null;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      stop.inflight.delete(entry);
+      appConsole.modelEnded();
+      fn(value);
+    };
+    const handle = (event) => {
+      const data = event.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+      if (!data || data === "[DONE]") return;
+      let e;
+      try { e = JSON.parse(data); } catch { return; }
+      if (e.error) {
+        settle(reject, new Error(e.error.message ?? JSON.stringify(e.error)));
+        return;
+      }
+      const choice = e.choices && e.choices[0];
+      const delta = choice && (choice.delta?.content ?? choice.message?.content);
+      if (typeof delta === "string" && delta) {
+        full += delta;
+        appConsole.modelTokens(encodeURIComponent(delta).replace(/%../g, "x").length / 4);
+      }
+    };
+    const delegate = ObjC.delegate({
+      URLSession_dataTask_didReceiveData_: (session, task, data) => {
+        progress.chunks += 1;
+        showProgress();
+        pending.appendData_(data);
+        const text = ObjC.NSString.alloc().initWithData_encoding_(pending, 4);
+        if (text == null) return;
+        pending.setLength_(0);
+        raw += text;
+        buffer += text.replaceAll("\r", "");
+        const events = buffer.split("\n\n");
+        buffer = events.pop();
+        events.forEach(handle);
+      },
+      URLSession_task_didCompleteWithError_: (session, task, error) => {
+        const status = task.response()?.statusCode();
+        if (error) {
+          const lost = Object.assign(new Error(`${error.localizedDescription()} (${error.domain()} ${error.code()})`), {
+            networkLost: error.domain() === "NSURLErrorDomain" && NETWORK_LOST.includes(error.code()),
+          });
+          settle(reject, lost);
+        } else if (status !== 200) {
+          const limited = status === 429 ? rateLimit(task, raw) : null;
+          settle(reject, Object.assign(new Error(`Model request failed: HTTP ${status}: ${raw}`),
+            limited ? { rateLimited: true, retryAfter: limited.retryAfter } : {}));
+        } else if (full) {
+          settle(resolve, chatResponseFromText(full));
+        } else {
+          // Some gateways return a single JSON object instead of SSE.
+          try {
+            const j = JSON.parse(raw);
+            const t = j.choices?.[0]?.message?.content;
+            if (typeof t === "string") settle(resolve, chatResponseFromText(t));
+            else settle(reject, new Error("Chat stream ended without content."));
+          } catch {
+            settle(reject, new Error("Chat stream ended without content."));
+          }
+        }
+      },
+    }, ["NSURLSessionDataDelegate"]);
     const config = ObjC.NSURLSessionConfiguration.ephemeralSessionConfiguration();
     config.setWaitsForConnectivity_(true);
     const session = ObjC.NSURLSession.sessionWithConfiguration_delegate_delegateQueue_(
@@ -1116,9 +1259,10 @@ const env = new JSEnv({
   },
   readInput: (prompt) => appConsole.input(prompt),
 });
-const mind = new Mind(request, INSTRUCTIONS + "\n\n\n" + IPHONE);
+const mind = new Mind((body) => request(body, "shell"), INSTRUCTIONS + "\n\n\n" + IPHONE);
 const agent = new Agent(mind);
-env.bind({ call_llm_api: (input, params) => mind.query(input, params) });  // boot.js may use it before the agent runs.
+const appMind = new Mind((body) => request(body, "app"), "");  // #30: App channel (Ideas / helpers)
+env.bind({ call_llm_api: (input, params) => appMind.query(input, params) });  // boot.js may use it before the agent runs.
 const HOST_NAMES = new Set(Object.getOwnPropertyNames(globalThis));  // Hidden from variables().
 
 const defaults = ObjC.NSUserDefaults.standardUserDefaults();
@@ -1140,6 +1284,8 @@ function resetApp() {
   }
   defaults.removePersistentDomainForName_(ObjC.NSBundle.mainBundle().bundleIdentifier());
   native.keychainSet(SETTINGS, null);
+  native.keychainSet(SETTINGS_APP, null);
+  CONFIG_APP = null;
   defaults.synchronize();
   try {
     ObjC.UIApplication.sharedApplication().performSelector_("terminateWithSuccess");  // Private; there is no public way.
