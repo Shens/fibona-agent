@@ -27,6 +27,15 @@
 	<array>
 		<integer>1</integer>
 	</array>
+	<!-- GUI pages assume portrait; landscape only worked for the console. Lock until layouts adapt (#27). -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~iphone</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
