@@ -1014,6 +1014,14 @@ function streamResponse(body, cfg, codex = null) {
     let raw = "";  // Everything received, for errors that are not events.
     let settled = false;
     let entry = null;  // For a stop to end this request; see stopCell.
+    // ChatGPT plan / Responses Lite often sends output items only as stream events; response.completed then
+    // arrives with output:[]. Rebuild from output_item.done (and argument finals) so set_next_cell is visible.
+    const streamed = [];  // sparse by output_index
+    const putItem = (index, item) => {
+      if (index == null || !item) return;
+      streamed[index] = item;
+    };
+    const streamedOutput = () => streamed.filter(Boolean);
     const settle = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -1026,35 +1034,41 @@ function streamResponse(body, cfg, codex = null) {
       const msg = err?.message ?? (typeof err === "string" ? err : null) ?? JSON.stringify(err ?? "Model request failed.");
       return new Error(msg + code);
     };
+    const finish = (response, ok) => {
+      response = response ?? {};
+      if (!(response.output && response.output.length) && streamedOutput().length) {
+        response.output = streamedOutput();
+      }
+      response = withOutputText(response);
+      if (codex) {
+        const kinds = (response.output ?? []).map((o) => o.type + (o.name ? ":" + o.name : ""));
+        logApp(`chatgpt ${ok ? "completed" : "incomplete"} status=${response.status} output=[${kinds.join(", ")}] `
+          + `text=${JSON.stringify((response.output_text || "").slice(0, 120))}`);
+      }
+      if (ok) settle(resolve, response);
+      else {
+        const reason = response.incomplete_details?.reason ?? "incomplete";
+        const text = (response.output_text || "").trim();
+        settle(reject, new Error(`Model response incomplete (${reason})${text ? ": " + text.slice(0, 500) : ""}`));
+      }
+    };
     const handle = (event) => {
       const data = event.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
       if (!data || data === "[DONE]") return;
       const e = JSON.parse(data);
       if (e.type?.endsWith(".delta") && typeof e.delta === "string") {
         appConsole.modelTokens(encodeURIComponent(e.delta).replace(/%../g, "x").length / 4);  // UTF-8 bytes / 4
+      } else if (e.type === "response.output_item.added" || e.type === "response.output_item.done") {
+        putItem(e.output_index, e.item);
+      } else if (e.type === "response.function_call_arguments.done") {
+        const item = streamed[e.output_index] ?? { type: "function_call", id: e.item_id };
+        item.arguments = e.arguments ?? item.arguments;
+        if (e.item_id) item.id = item.id ?? e.item_id;
+        putItem(e.output_index, item);
       } else if (e.type === "response.completed") {
-        const response = withOutputText(e.response ?? {});
-        if (codex) {
-          const kinds = (response.output ?? []).map((o) => o.type + (o.name ? ":" + o.name : ""));
-          const note = `chatgpt completed status=${response.status} id=${response.id || "?"} output=[${kinds.join(", ")}] `
-            + `text=${JSON.stringify((response.output_text || "").slice(0, 120))} rawTail=${JSON.stringify(raw.slice(-800))}`;
-          logApp(note);
-          try { print(note); } catch {}
-          // Empty completed responses were the ChatGPT-OAuth failure mode; surface the wire body instead of
-          // pretending the mind answered.
-          if (!(response.output && response.output.length)) {
-            settle(reject, new Error(`ChatGPT plan returned empty output. ${note}`));
-            return;
-          }
-        }
-        settle(resolve, response);
+        finish(e.response ?? {}, true);
       } else if (e.type === "response.incomplete") {
-        // Plan usage and other soft stops arrive here; treating them as success hid the real reason and left
-        // the agent with no set_next_cell. Fail with the incomplete reason and any output text.
-        const response = withOutputText(e.response ?? {});
-        const reason = response.incomplete_details?.reason ?? "incomplete";
-        const text = (response.output_text || "").trim();
-        settle(reject, new Error(`Model response incomplete (${reason})${text ? ": " + text.slice(0, 500) : ""}`));
+        finish(e.response ?? {}, false);
       } else if (e.type === "response.failed") {
         settle(reject, failResponse(e.response?.error));
       } else if (e.type === "error") {
