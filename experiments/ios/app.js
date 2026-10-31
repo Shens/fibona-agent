@@ -28,8 +28,9 @@ The host is source_code['app.js']; read it for details.
   freed object crashes the app, and this session with it.
 - Build interfaces with UIKit (SwiftUI is not reachable) in your own UIWindow, made with
   \`ObjC.UIWindow.alloc().initWithWindowScene_(windowScene)\` (one made with initWithFrame_ joins no scene and never
-  shows), then hide the console with \`consoleWindow.setHidden_(true)\`. The user can reopen it with the floating
-  spiral button.
+  shows), then hide the console with \`consoleWindow.setHidden_(true)\`. The floating spiral button toggles the console.
+  On the GUI it stays hidden unless the user turns it on under Dashboard settings; while the console itself is
+  open the button is always on screen, so they can get back.
 - **Home-screen widget**: Fibona's widget shows PNGs you draw into \`ObjC.FBWidget.directory()\`, named by the Unix
   time they start showing, with optional tap regions in \`<image>.json\`; call \`ObjC.FBWidget.reload()\` after writing.
   Its rules are in source_code['widget/Widget.swift']. It needs an app group, which this build leaves out for
@@ -262,7 +263,8 @@ class Console {
     handle.addGestureRecognizer_(ObjC.UIPanGestureRecognizer.alloc().initWithTarget_action_(this.handleTarget, "drag:"));
     handle.addGestureRecognizer_(ObjC.UILongPressGestureRecognizer.alloc().initWithTarget_action_(this.handleTarget, "hold:"));
     this.handleWindow.rootViewController().view().addSubview_(handle);
-    this.handleWindow.setHidden_(false);
+    this.handleWindow.setHidden_(false);  // Console is the screen at launch, so the button stays until hide().
+    this.keepHandle = false;  // #36: GUI hides the button unless 其他设置 turns this on.
 
     this.timer = ObjC.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.1, true, ObjC.block("v@", () => this.refresh()));
     // Leaving the app is the last sure chance to save: the system may end it in the background without a word.
@@ -439,7 +441,8 @@ class Console {
     } else if (state.startsWith("Running")) {
       state += ` · ${seconds}s`;
     }
-    this.statusLabel.setAttributedText_(this.styled(state, "status", 12));
+    const shellModel = (typeof CONFIG !== "undefined" && CONFIG && CONFIG.model) ? ` · ${CONFIG.model}` : "";
+    this.statusLabel.setAttributedText_(this.styled(state + shellModel, "status", 12));
     this.speedLabel.setAttributedText_(this.styled(`↓ ${speed.toFixed(0)} tok/s`, "speed", 12));
     const busy = this.modelRequests > 0 || this.state.startsWith("Running");
     if (busy !== this.spinner.isAnimating()) busy ? this.spinner.startAnimating() : this.spinner.stopAnimating();
@@ -496,12 +499,14 @@ class Console {
 
   show() {
     this.window.makeKeyAndVisible();
+    if (this.handleWindow) this.handleWindow.setHidden_(false);
     if (this.scrollPending) this.scrollToEnd();
     this.scrollPending = false;
   }
 
   hide() {
     this.window.setHidden_(true);
+    if (this.handleWindow && !this.keepHandle) this.handleWindow.setHidden_(true);
   }
 }
 
